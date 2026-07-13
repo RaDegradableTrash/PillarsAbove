@@ -17,7 +17,7 @@ Prototype foundation for a vertical stone-pillar building game inspired by Towns
 - Multi-cell build preview that shows the full module footprint before placement.
 - Taller 60-cell pillar and more vibrant water with animated gleam objects.
 - Runtime hierarchy is organized into camera, lighting, pillar, ocean, and interaction preview groups.
-- Ocean is made from separate scene objects: main water, hazy horizon water, animated wave bands, white splash foam, and gleams.
+- Ocean is made from separate scene objects: a low-poly swell mesh, hazy horizon water, soft oval wave patches, curved white shore foam, and subtle water highlights.
 
 ## Try It
 

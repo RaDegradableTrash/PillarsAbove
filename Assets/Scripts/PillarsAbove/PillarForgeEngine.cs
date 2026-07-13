@@ -30,6 +30,9 @@ namespace PillarsAbove
         private readonly List<Transform> waveBands = new List<Transform>(10);
         private readonly List<Transform> splashFoam = new List<Transform>(16);
         private readonly List<Transform> waterGleams = new List<Transform>(3);
+        private Vector3[] seaBaseVertices;
+        private Vector3[] seaAnimatedVertices;
+        private Mesh seaMesh;
 
         private Mesh pillarMesh;
         private MeshFilter pillarFilter;
@@ -210,19 +213,21 @@ namespace PillarsAbove
 
             oceanMaterial = new Material(Shader.Find("Standard"));
             oceanMaterial.name = "Runtime Vast Green Sea";
-            oceanMaterial.color = new Color(0.02f, 0.58f, 0.66f);
-            oceanMaterial.SetFloat("_Glossiness", 0.92f);
+            oceanMaterial.color = new Color(0.08f, 0.62f, 0.62f);
+            oceanMaterial.SetFloat("_Glossiness", 0.38f);
             oceanMaterial.SetFloat("_Metallic", 0.02f);
 
             waveMaterial = new Material(Shader.Find("Standard"));
-            waveMaterial.name = "Runtime Layered Wave Teal";
-            waveMaterial.color = new Color(0.04f, 0.74f, 0.78f);
-            waveMaterial.SetFloat("_Glossiness", 0.88f);
+            waveMaterial.name = "Runtime Soft North Sea Wave";
+            waveMaterial.color = new Color(0.45f, 0.86f, 0.78f, 0.38f);
+            waveMaterial.SetFloat("_Glossiness", 0.18f);
+            ConfigureTransparentMaterial(waveMaterial, 3000);
 
             foamMaterial = new Material(Shader.Find("Standard"));
             foamMaterial.name = "Runtime White Sea Foam";
-            foamMaterial.color = new Color(0.88f, 0.96f, 0.91f);
-            foamMaterial.SetFloat("_Glossiness", 0.64f);
+            foamMaterial.color = new Color(0.93f, 0.98f, 0.90f, 0.86f);
+            foamMaterial.SetFloat("_Glossiness", 0.08f);
+            ConfigureTransparentMaterial(foamMaterial, 3010);
 
             previewMaterial = new Material(Shader.Find("Standard"));
             previewMaterial.name = "Runtime Cell Cursor";
@@ -235,6 +240,18 @@ namespace PillarsAbove
             previewMaterial.EnableKeyword("_ALPHABLEND_ON");
             previewMaterial.DisableKeyword("_ALPHAPREMULTIPLY_ON");
             previewMaterial.renderQueue = 3000;
+        }
+
+        private void ConfigureTransparentMaterial(Material material, int renderQueue)
+        {
+            material.SetFloat("_Mode", 3f);
+            material.SetInt("_SrcBlend", (int)UnityEngine.Rendering.BlendMode.SrcAlpha);
+            material.SetInt("_DstBlend", (int)UnityEngine.Rendering.BlendMode.OneMinusSrcAlpha);
+            material.SetInt("_ZWrite", 0);
+            material.DisableKeyword("_ALPHATEST_ON");
+            material.EnableKeyword("_ALPHABLEND_ON");
+            material.DisableKeyword("_ALPHAPREMULTIPLY_ON");
+            material.renderQueue = renderQueue;
         }
 
         private void CreatePillarObjects()
@@ -254,12 +271,15 @@ namespace PillarsAbove
 
         private void CreateOcean()
         {
-            var ocean = GameObject.CreatePrimitive(PrimitiveType.Plane);
-            ocean.name = "Sea Surface - Main";
+            var ocean = new GameObject("Sea Surface - Low Poly Swell");
             ocean.transform.SetParent(oceanRoot);
             ocean.transform.position = new Vector3(0f, -0.16f, 0f);
-            ocean.transform.localScale = new Vector3(140f, 1f, 140f);
-            var renderer = ocean.GetComponent<MeshRenderer>();
+            var filter = ocean.AddComponent<MeshFilter>();
+            var renderer = ocean.AddComponent<MeshRenderer>();
+            seaMesh = CreateSeaMesh(240f, 32);
+            seaBaseVertices = seaMesh.vertices;
+            seaAnimatedVertices = new Vector3[seaBaseVertices.Length];
+            filter.sharedMesh = seaMesh;
             renderer.sharedMaterial = oceanMaterial;
             renderer.receiveShadows = true;
 
@@ -277,48 +297,88 @@ namespace PillarsAbove
 
             CreateWaveBands();
             CreateSplashFoam();
-            CreateWaterGleam("Water Gleam A", new Vector3(-34f, -0.11f, 24f), new Vector3(9f, 0.018f, 0.18f), 18f);
-            CreateWaterGleam("Water Gleam B", new Vector3(28f, -0.105f, -18f), new Vector3(7f, 0.018f, 0.14f), -24f);
-            CreateWaterGleam("Water Gleam C", new Vector3(6f, -0.10f, 42f), new Vector3(11f, 0.018f, 0.16f), 6f);
+            CreateWaterGleam("Soft Water Highlight A", new Vector3(-35f, -0.055f, 24f), new Vector3(7.5f, 1f, 0.70f), 18f);
+            CreateWaterGleam("Soft Water Highlight B", new Vector3(28f, -0.052f, -18f), new Vector3(6f, 1f, 0.62f), -24f);
+            CreateWaterGleam("Soft Water Highlight C", new Vector3(8f, -0.05f, 42f), new Vector3(8.5f, 1f, 0.68f), 6f);
+        }
+
+        private Mesh CreateSeaMesh(float size, int divisions)
+        {
+            var mesh = new Mesh { name = "Runtime Low Poly Sea Mesh" };
+            var verts = new Vector3[(divisions + 1) * (divisions + 1)];
+            var tris = new int[divisions * divisions * 6];
+            var half = size * 0.5f;
+
+            for (var z = 0; z <= divisions; z++)
+            {
+                for (var x = 0; x <= divisions; x++)
+                {
+                    var index = z * (divisions + 1) + x;
+                    var px = Mathf.Lerp(-half, half, x / (float)divisions);
+                    var pz = Mathf.Lerp(-half, half, z / (float)divisions);
+                    var lowPolyOffset = (Stable01(x * 79 + z * 131) - 0.5f) * 0.035f;
+                    verts[index] = new Vector3(px, lowPolyOffset, pz);
+                }
+            }
+
+            var tri = 0;
+            for (var z = 0; z < divisions; z++)
+            {
+                for (var x = 0; x < divisions; x++)
+                {
+                    var a = z * (divisions + 1) + x;
+                    var b = a + 1;
+                    var c = a + divisions + 1;
+                    var d = c + 1;
+                    tris[tri++] = a;
+                    tris[tri++] = c;
+                    tris[tri++] = b;
+                    tris[tri++] = b;
+                    tris[tri++] = c;
+                    tris[tri++] = d;
+                }
+            }
+
+            mesh.vertices = verts;
+            mesh.triangles = tris;
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
         }
 
         private void CreateWaveBands()
         {
-            for (var i = 0; i < 10; i++)
+            for (var i = 0; i < 14; i++)
             {
-                var band = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                band.name = "Stylized Wave Band " + i;
+                var band = new GameObject("Soft Oval Wave " + i);
                 band.transform.SetParent(oceanRoot);
-                band.transform.position = new Vector3(-58f + i * 13f, -0.09f, -42f + (i % 4) * 26f);
-                band.transform.rotation = Quaternion.Euler(0f, -18f + i * 7f, 0f);
-                band.transform.localScale = new Vector3(18f + (i % 3) * 5f, 0.025f, 0.16f + (i % 2) * 0.07f);
-                band.GetComponent<MeshRenderer>().sharedMaterial = waveMaterial;
-                Destroy(band.GetComponent<BoxCollider>());
+                band.transform.position = new Vector3(-64f + i * 10f, -0.048f, -48f + (i % 5) * 23f);
+                band.transform.rotation = Quaternion.Euler(0f, -12f + i * 9f, 0f);
+                band.transform.localScale = new Vector3(5.8f + (i % 4) * 1.6f, 1f, 0.52f + (i % 3) * 0.12f);
+                band.AddComponent<MeshFilter>().sharedMesh = CreateOvalMesh(24);
+                band.AddComponent<MeshRenderer>().sharedMaterial = waveMaterial;
                 waveBands.Add(band.transform);
             }
         }
 
         private void CreateSplashFoam()
         {
-            for (var i = 0; i < 16; i++)
+            for (var i = 0; i < 18; i++)
             {
-                var angle = i / 16f * Mathf.PI * 2f;
-                var radius = 13.2f + (i % 3) * 0.8f;
-                var foam = GameObject.CreatePrimitive(PrimitiveType.Cube);
-                foam.name = "White Splash Foam " + i;
+                var angle = i / 18f * Mathf.PI * 2f;
+                var radius = 13.6f + (i % 3) * 0.42f;
+                var foam = new GameObject("Curved White Shore Foam " + i);
                 foam.transform.SetParent(oceanRoot);
-                foam.transform.position = new Vector3(Mathf.Cos(angle) * radius, -0.075f, Mathf.Sin(angle) * radius);
-                foam.transform.rotation = Quaternion.Euler(0f, -angle * Mathf.Rad2Deg + 90f, 0f);
-                foam.transform.localScale = new Vector3(3.2f + (i % 4) * 0.45f, 0.028f, 0.16f);
-                foam.GetComponent<MeshRenderer>().sharedMaterial = foamMaterial;
-                Destroy(foam.GetComponent<BoxCollider>());
+                foam.transform.position = new Vector3(0f, -0.042f, 0f);
+                foam.AddComponent<MeshFilter>().sharedMesh = CreateArcStripMesh(radius, 0.18f, angle - 0.09f, 0.16f + (i % 3) * 0.035f, 6);
+                foam.AddComponent<MeshRenderer>().sharedMaterial = foamMaterial;
                 splashFoam.Add(foam.transform);
             }
         }
 
         private void CreateWaterGleam(string name, Vector3 position, Vector3 scale, float yaw)
         {
-            var gleam = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            var gleam = new GameObject(name);
             gleam.name = name;
             gleam.transform.SetParent(oceanRoot);
             gleam.transform.position = position;
@@ -327,11 +387,78 @@ namespace PillarsAbove
 
             var gleamMaterial = new Material(Shader.Find("Standard"));
             gleamMaterial.name = name + " Material";
-            gleamMaterial.color = new Color(0.62f, 0.92f, 0.86f);
-            gleamMaterial.SetFloat("_Glossiness", 0.96f);
-            gleam.GetComponent<MeshRenderer>().sharedMaterial = gleamMaterial;
-            Destroy(gleam.GetComponent<BoxCollider>());
+            gleamMaterial.color = new Color(0.78f, 0.95f, 0.83f, 0.45f);
+            gleamMaterial.SetFloat("_Glossiness", 0.20f);
+            ConfigureTransparentMaterial(gleamMaterial, 3005);
+            gleam.AddComponent<MeshFilter>().sharedMesh = CreateOvalMesh(22);
+            gleam.AddComponent<MeshRenderer>().sharedMaterial = gleamMaterial;
             waterGleams.Add(gleam.transform);
+        }
+
+        private Mesh CreateOvalMesh(int segments)
+        {
+            var mesh = new Mesh { name = "Runtime Soft Oval Mesh" };
+            var verts = new Vector3[segments + 1];
+            var tris = new int[segments * 3];
+            verts[0] = Vector3.zero;
+
+            for (var i = 0; i < segments; i++)
+            {
+                var angle = i / (float)segments * Mathf.PI * 2f;
+                verts[i + 1] = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle));
+            }
+
+            for (var i = 0; i < segments; i++)
+            {
+                var tri = i * 3;
+                tris[tri] = 0;
+                tris[tri + 1] = i + 1;
+                tris[tri + 2] = i == segments - 1 ? 1 : i + 2;
+            }
+
+            mesh.vertices = verts;
+            mesh.triangles = tris;
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
+        }
+
+        private Mesh CreateArcStripMesh(float radius, float thickness, float startAngle, float length, int segments)
+        {
+            var mesh = new Mesh { name = "Runtime Curved Foam Mesh" };
+            var verts = new Vector3[(segments + 1) * 2];
+            var tris = new int[segments * 6];
+            var inner = radius - thickness * 0.5f;
+            var outer = radius + thickness * 0.5f;
+
+            for (var i = 0; i <= segments; i++)
+            {
+                var angle = startAngle + length * (i / (float)segments);
+                var direction = new Vector3(Mathf.Cos(angle), 0f, Mathf.Sin(angle));
+                verts[i * 2] = direction * inner;
+                verts[i * 2 + 1] = direction * outer;
+            }
+
+            var triIndex = 0;
+            for (var i = 0; i < segments; i++)
+            {
+                var a = i * 2;
+                var b = a + 1;
+                var c = a + 2;
+                var d = a + 3;
+                tris[triIndex++] = a;
+                tris[triIndex++] = b;
+                tris[triIndex++] = c;
+                tris[triIndex++] = c;
+                tris[triIndex++] = b;
+                tris[triIndex++] = d;
+            }
+
+            mesh.vertices = verts;
+            mesh.triangles = tris;
+            mesh.RecalculateNormals();
+            mesh.RecalculateBounds();
+            return mesh;
         }
 
         private void CreateCursor()
@@ -526,11 +653,12 @@ namespace PillarsAbove
         {
             var wave = Mathf.Sin(Time.time * 0.65f) * 0.035f;
 
-            var mainSea = oceanRoot.Find("Sea Surface - Main");
+            var mainSea = oceanRoot.Find("Sea Surface - Low Poly Swell");
             if (mainSea != null)
             {
                 mainSea.position = new Vector3(0f, -0.16f + wave, 0f);
             }
+            AnimateSeaMesh();
 
             var horizon = oceanRoot.Find("Sea Surface - Hazy Horizon");
             if (horizon != null)
@@ -543,12 +671,13 @@ namespace PillarsAbove
                 var band = waveBands[i];
                 var phase = Time.time * (0.75f + i * 0.025f) + i * 0.9f;
                 var position = band.position;
-                position.x += Mathf.Sin(phase) * Time.deltaTime * 0.18f;
-                position.y = -0.075f + Mathf.Sin(phase) * 0.035f;
+                position.x += Mathf.Sin(phase) * Time.deltaTime * 0.035f;
+                position.y = -0.048f + Mathf.Sin(phase) * 0.012f;
                 band.position = position;
 
                 var scale = band.localScale;
-                scale.x = 18f + (i % 3) * 5f + Mathf.Sin(phase * 0.8f) * 1.4f;
+                scale.x = 5.8f + (i % 4) * 1.6f + Mathf.Sin(phase * 0.8f) * 0.32f;
+                scale.z = 0.52f + (i % 3) * 0.12f + Mathf.Cos(phase * 0.7f) * 0.05f;
                 band.localScale = scale;
             }
 
@@ -556,13 +685,11 @@ namespace PillarsAbove
             {
                 var foam = splashFoam[i];
                 var phase = Time.time * 1.2f + i * 0.55f;
-                var scale = foam.localScale;
-                scale.x = 3.1f + (i % 4) * 0.45f + Mathf.Sin(phase) * 0.45f;
-                scale.z = 0.14f + Mathf.Cos(phase * 1.3f) * 0.035f;
-                foam.localScale = scale;
+                var pulse = 1f + Mathf.Sin(phase) * 0.025f;
+                foam.localScale = new Vector3(pulse, 1f, pulse);
 
                 var position = foam.position;
-                position.y = -0.058f + Mathf.Sin(phase) * 0.026f;
+                position.y = -0.042f + Mathf.Sin(phase) * 0.010f;
                 foam.position = position;
             }
 
@@ -582,6 +709,27 @@ namespace PillarsAbove
             var position = gleam.position;
             position.y = -0.095f + wave * 0.55f + Mathf.Sin(Time.time * 0.4f + phase) * 0.01f;
             gleam.position = position;
+        }
+
+        private void AnimateSeaMesh()
+        {
+            if (seaMesh == null || seaBaseVertices == null || seaAnimatedVertices == null)
+            {
+                return;
+            }
+
+            for (var i = 0; i < seaBaseVertices.Length; i++)
+            {
+                var vertex = seaBaseVertices[i];
+                var longSwell = Mathf.Sin(vertex.x * 0.045f + Time.time * 0.55f) * 0.055f;
+                var crossSwell = Mathf.Cos(vertex.z * 0.052f + Time.time * 0.38f) * 0.035f;
+                vertex.y += longSwell + crossSwell;
+                seaAnimatedVertices[i] = vertex;
+            }
+
+            seaMesh.vertices = seaAnimatedVertices;
+            seaMesh.RecalculateNormals();
+            seaMesh.RecalculateBounds();
         }
 
         private void CarveCavity(Vector3Int center, int radius)
