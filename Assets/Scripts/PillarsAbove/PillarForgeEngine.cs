@@ -27,6 +27,9 @@ namespace PillarsAbove
         private readonly List<Vector3> normals = new List<Vector3>(32768);
         private readonly Dictionary<int, Vector3Int> faceToCell = new Dictionary<int, Vector3Int>();
         private readonly List<GameObject> buildPreviewCells = new List<GameObject>(24);
+        private readonly List<Transform> waveBands = new List<Transform>(10);
+        private readonly List<Transform> splashFoam = new List<Transform>(16);
+        private readonly List<Transform> waterGleams = new List<Transform>(3);
 
         private Mesh pillarMesh;
         private MeshFilter pillarFilter;
@@ -37,7 +40,14 @@ namespace PillarsAbove
         private Material sunStoneMaterial;
         private Material buildingMaterial;
         private Material oceanMaterial;
+        private Material waveMaterial;
+        private Material foamMaterial;
         private Material previewMaterial;
+        private Transform cameraRoot;
+        private Transform lightingRoot;
+        private Transform pillarRoot;
+        private Transform oceanRoot;
+        private Transform interactionRoot;
         private ToolMode toolMode = ToolMode.Carve;
         private Vector2 orbitAngles = new Vector2(42f, 24f);
         private float orbitDistance = 72f;
@@ -62,6 +72,7 @@ namespace PillarsAbove
 
         private void Awake()
         {
+            CreateHierarchyRoots();
             ConfigureCamera();
             ConfigureLighting();
             CreateMaterials();
@@ -71,6 +82,23 @@ namespace PillarsAbove
             RebuildMesh();
             CreateCursor();
             CreateBuildPreviewPool();
+        }
+
+        private void CreateHierarchyRoots()
+        {
+            transform.name = "Pillars Above Runtime Scene";
+            cameraRoot = CreateRoot("00 Camera Rig");
+            lightingRoot = CreateRoot("10 Lighting");
+            pillarRoot = CreateRoot("20 Pillar Grid World");
+            oceanRoot = CreateRoot("30 Ocean System");
+            interactionRoot = CreateRoot("40 Interaction Preview");
+        }
+
+        private Transform CreateRoot(string rootName)
+        {
+            var root = new GameObject(rootName);
+            root.transform.SetParent(transform);
+            return root.transform;
         }
 
         private void Update()
@@ -124,6 +152,7 @@ namespace PillarsAbove
             sceneCamera.nearClipPlane = 0.1f;
             sceneCamera.farClipPlane = 500f;
             sceneCamera.backgroundColor = new Color(0.58f, 0.66f, 0.68f);
+            sceneCamera.transform.SetParent(cameraRoot);
         }
 
         private void ConfigureLighting()
@@ -146,13 +175,15 @@ namespace PillarsAbove
             }
 
             existing.type = LightType.Directional;
+            existing.name = "Sun Key Light";
+            existing.transform.SetParent(lightingRoot);
             existing.intensity = 1.35f;
             existing.color = new Color(1f, 0.82f, 0.58f);
             existing.transform.rotation = Quaternion.Euler(44f, -38f, 0f);
             existing.shadows = LightShadows.Soft;
 
             var fillObject = new GameObject("Soft Blue Fill");
-            fillObject.transform.SetParent(transform);
+            fillObject.transform.SetParent(lightingRoot);
             var fill = fillObject.AddComponent<Light>();
             fill.type = LightType.Directional;
             fill.intensity = 0.22f;
@@ -183,6 +214,16 @@ namespace PillarsAbove
             oceanMaterial.SetFloat("_Glossiness", 0.92f);
             oceanMaterial.SetFloat("_Metallic", 0.02f);
 
+            waveMaterial = new Material(Shader.Find("Standard"));
+            waveMaterial.name = "Runtime Layered Wave Teal";
+            waveMaterial.color = new Color(0.04f, 0.74f, 0.78f);
+            waveMaterial.SetFloat("_Glossiness", 0.88f);
+
+            foamMaterial = new Material(Shader.Find("Standard"));
+            foamMaterial.name = "Runtime White Sea Foam";
+            foamMaterial.color = new Color(0.88f, 0.96f, 0.91f);
+            foamMaterial.SetFloat("_Glossiness", 0.64f);
+
             previewMaterial = new Material(Shader.Find("Standard"));
             previewMaterial.name = "Runtime Cell Cursor";
             previewMaterial.color = new Color(0.96f, 0.82f, 0.38f, 0.42f);
@@ -199,7 +240,7 @@ namespace PillarsAbove
         private void CreatePillarObjects()
         {
             var pillar = new GameObject("Voxelized Megalith Pillar");
-            pillar.transform.SetParent(transform);
+            pillar.transform.SetParent(pillarRoot);
             pillarFilter = pillar.AddComponent<MeshFilter>();
             pillarRenderer = pillar.AddComponent<MeshRenderer>();
             pillarCollider = pillar.AddComponent<MeshCollider>();
@@ -214,8 +255,8 @@ namespace PillarsAbove
         private void CreateOcean()
         {
             var ocean = GameObject.CreatePrimitive(PrimitiveType.Plane);
-            ocean.name = "Open Sea";
-            ocean.transform.SetParent(transform);
+            ocean.name = "Sea Surface - Main";
+            ocean.transform.SetParent(oceanRoot);
             ocean.transform.position = new Vector3(0f, -0.16f, 0f);
             ocean.transform.localScale = new Vector3(140f, 1f, 140f);
             var renderer = ocean.GetComponent<MeshRenderer>();
@@ -223,8 +264,8 @@ namespace PillarsAbove
             renderer.receiveShadows = true;
 
             var horizon = GameObject.CreatePrimitive(PrimitiveType.Plane);
-            horizon.name = "Distant Pale Sea Shelf";
-            horizon.transform.SetParent(transform);
+            horizon.name = "Sea Surface - Hazy Horizon";
+            horizon.transform.SetParent(oceanRoot);
             horizon.transform.position = new Vector3(0f, -0.18f, 0f);
             horizon.transform.localScale = new Vector3(360f, 1f, 360f);
             var horizonRenderer = horizon.GetComponent<MeshRenderer>();
@@ -234,16 +275,52 @@ namespace PillarsAbove
             horizonMaterial.SetFloat("_Glossiness", 0.70f);
             horizonRenderer.sharedMaterial = horizonMaterial;
 
+            CreateWaveBands();
+            CreateSplashFoam();
             CreateWaterGleam("Water Gleam A", new Vector3(-34f, -0.11f, 24f), new Vector3(9f, 0.018f, 0.18f), 18f);
             CreateWaterGleam("Water Gleam B", new Vector3(28f, -0.105f, -18f), new Vector3(7f, 0.018f, 0.14f), -24f);
             CreateWaterGleam("Water Gleam C", new Vector3(6f, -0.10f, 42f), new Vector3(11f, 0.018f, 0.16f), 6f);
+        }
+
+        private void CreateWaveBands()
+        {
+            for (var i = 0; i < 10; i++)
+            {
+                var band = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                band.name = "Stylized Wave Band " + i;
+                band.transform.SetParent(oceanRoot);
+                band.transform.position = new Vector3(-58f + i * 13f, -0.09f, -42f + (i % 4) * 26f);
+                band.transform.rotation = Quaternion.Euler(0f, -18f + i * 7f, 0f);
+                band.transform.localScale = new Vector3(18f + (i % 3) * 5f, 0.025f, 0.16f + (i % 2) * 0.07f);
+                band.GetComponent<MeshRenderer>().sharedMaterial = waveMaterial;
+                Destroy(band.GetComponent<BoxCollider>());
+                waveBands.Add(band.transform);
+            }
+        }
+
+        private void CreateSplashFoam()
+        {
+            for (var i = 0; i < 16; i++)
+            {
+                var angle = i / 16f * Mathf.PI * 2f;
+                var radius = 13.2f + (i % 3) * 0.8f;
+                var foam = GameObject.CreatePrimitive(PrimitiveType.Cube);
+                foam.name = "White Splash Foam " + i;
+                foam.transform.SetParent(oceanRoot);
+                foam.transform.position = new Vector3(Mathf.Cos(angle) * radius, -0.075f, Mathf.Sin(angle) * radius);
+                foam.transform.rotation = Quaternion.Euler(0f, -angle * Mathf.Rad2Deg + 90f, 0f);
+                foam.transform.localScale = new Vector3(3.2f + (i % 4) * 0.45f, 0.028f, 0.16f);
+                foam.GetComponent<MeshRenderer>().sharedMaterial = foamMaterial;
+                Destroy(foam.GetComponent<BoxCollider>());
+                splashFoam.Add(foam.transform);
+            }
         }
 
         private void CreateWaterGleam(string name, Vector3 position, Vector3 scale, float yaw)
         {
             var gleam = GameObject.CreatePrimitive(PrimitiveType.Cube);
             gleam.name = name;
-            gleam.transform.SetParent(transform);
+            gleam.transform.SetParent(oceanRoot);
             gleam.transform.position = position;
             gleam.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
             gleam.transform.localScale = scale;
@@ -254,12 +331,14 @@ namespace PillarsAbove
             gleamMaterial.SetFloat("_Glossiness", 0.96f);
             gleam.GetComponent<MeshRenderer>().sharedMaterial = gleamMaterial;
             Destroy(gleam.GetComponent<BoxCollider>());
+            waterGleams.Add(gleam.transform);
         }
 
         private void CreateCursor()
         {
             cursor = GameObject.CreatePrimitive(PrimitiveType.Cube);
             cursor.name = "Grid Cursor";
+            cursor.transform.SetParent(interactionRoot);
             cursor.transform.localScale = Vector3.one * 0.92f;
             cursor.GetComponent<MeshRenderer>().sharedMaterial = previewMaterial;
             Destroy(cursor.GetComponent<BoxCollider>());
@@ -272,7 +351,7 @@ namespace PillarsAbove
             {
                 var preview = GameObject.CreatePrimitive(PrimitiveType.Cube);
                 preview.name = "Build Preview Cell " + i;
-                preview.transform.SetParent(transform);
+                preview.transform.SetParent(interactionRoot);
                 preview.transform.localScale = Vector3.one * 0.86f;
                 preview.GetComponent<MeshRenderer>().sharedMaterial = previewMaterial;
                 Destroy(preview.GetComponent<BoxCollider>());
@@ -445,28 +524,56 @@ namespace PillarsAbove
 
         private void AnimateOcean()
         {
-            var ocean = transform.Find("Open Sea");
-            var horizon = transform.Find("Distant Pale Sea Shelf");
             var wave = Mathf.Sin(Time.time * 0.65f) * 0.035f;
 
-            if (ocean != null)
+            var mainSea = oceanRoot.Find("Sea Surface - Main");
+            if (mainSea != null)
             {
-                ocean.position = new Vector3(0f, -0.16f + wave, 0f);
+                mainSea.position = new Vector3(0f, -0.16f + wave, 0f);
             }
 
+            var horizon = oceanRoot.Find("Sea Surface - Hazy Horizon");
             if (horizon != null)
             {
                 horizon.position = new Vector3(0f, -0.20f + wave * 0.35f, 0f);
             }
 
-            AnimateWaterGleam("Water Gleam A", wave, 0.4f);
-            AnimateWaterGleam("Water Gleam B", wave, 1.7f);
-            AnimateWaterGleam("Water Gleam C", wave, 2.6f);
+            for (var i = 0; i < waveBands.Count; i++)
+            {
+                var band = waveBands[i];
+                var phase = Time.time * (0.75f + i * 0.025f) + i * 0.9f;
+                var position = band.position;
+                position.x += Mathf.Sin(phase) * Time.deltaTime * 0.18f;
+                position.y = -0.075f + Mathf.Sin(phase) * 0.035f;
+                band.position = position;
+
+                var scale = band.localScale;
+                scale.x = 18f + (i % 3) * 5f + Mathf.Sin(phase * 0.8f) * 1.4f;
+                band.localScale = scale;
+            }
+
+            for (var i = 0; i < splashFoam.Count; i++)
+            {
+                var foam = splashFoam[i];
+                var phase = Time.time * 1.2f + i * 0.55f;
+                var scale = foam.localScale;
+                scale.x = 3.1f + (i % 4) * 0.45f + Mathf.Sin(phase) * 0.45f;
+                scale.z = 0.14f + Mathf.Cos(phase * 1.3f) * 0.035f;
+                foam.localScale = scale;
+
+                var position = foam.position;
+                position.y = -0.058f + Mathf.Sin(phase) * 0.026f;
+                foam.position = position;
+            }
+
+            for (var i = 0; i < waterGleams.Count; i++)
+            {
+                AnimateWaterGleam(waterGleams[i], wave, 0.4f + i * 1.3f);
+            }
         }
 
-        private void AnimateWaterGleam(string gleamName, float wave, float phase)
+        private void AnimateWaterGleam(Transform gleam, float wave, float phase)
         {
-            var gleam = transform.Find(gleamName);
             if (gleam == null)
             {
                 return;

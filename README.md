@@ -16,6 +16,8 @@ Prototype foundation for a vertical stone-pillar building game inspired by Towns
 - Relief panels and ledges layered on top of the grid so cells read more like stylized terrain units than individual Minecraft blocks.
 - Multi-cell build preview that shows the full module footprint before placement.
 - Taller 60-cell pillar and more vibrant water with animated gleam objects.
+- Runtime hierarchy is organized into camera, lighting, pillar, ocean, and interaction preview groups.
+- Ocean is made from separate scene objects: main water, hazy horizon water, animated wave bands, white splash foam, and gleams.
 
 ## Try It
 
