@@ -15,9 +15,12 @@ Prototype foundation for a vertical stone-pillar building game inspired by Towns
 - Double-sided surface geometry to avoid accidental see-through faces in the current prototype.
 - Relief panels and ledges layered on top of the grid so cells read more like stylized terrain units than individual Minecraft blocks.
 - Multi-cell build preview that shows the full module footprint before placement.
-- Taller 60-cell pillar and more vibrant water with animated gleam objects.
+- Rule-driven structure cells using the A0100/A1001/A1002/A2X00/A3100 naming scheme.
+- Local placement propagation that marks nearby cells dirty after a build, then auto-completes door landings, platforms, and columns.
+- Connector-style placement rules for ground support, wall continuity, vertical support, and door-facing platform requirements.
+- A 71-cell cross-section radius (5x the original) with a wider overview camera, expanded ocean horizon, and distance-scaled atmospheric fog.
 - Runtime hierarchy is organized into camera, lighting, pillar, ocean, and interaction preview groups.
-- Ocean is made from separate scene objects: a low-poly directional swell mesh, hazy horizon water, soft oval wave patches, curved shore foam, raised foam crests, impact splash spires, and subtle water highlights.
+- Ocean impact foam is generated from one procedural shore-collision mesh driven by wave phase, incoming flow direction, shoreline radius, and turbulence noise instead of pre-placed foam strips.
 
 ## Try It
 
@@ -26,8 +29,7 @@ Open `Assets/Scenes/SampleScene.unity` and press Play. The engine bootstraps its
 Controls:
 
 - Left click: use the selected tool on the highlighted cell.
-- Right drag: rotate around the pillar horizontally and move the perspective up/down vertically.
-- Hold Shift: move the mouse to rotate or move up/down without holding right click.
+- Hold right mouse or Shift: temporarily hide and lock the cursor, then restore it to the original position when released; move the mouse to drive the camera direction. Up/down moves the camera target vertically, and left/right moves quickly around the pillar while staying faced toward it.
 - Mouse wheel: zoom.
 - Q / E: move the camera target down / up the pillar.
 - 1 / 2 / 3: carve / build / restore.
@@ -35,8 +37,9 @@ Controls:
 
 ## Next Engine Work
 
-- Replace cube modules with rule-driven architectural pieces.
-- Add slope/roof/window rules so building clusters merge like a city toy.
+- Replace the first-pass procedural panels with authored isolated/connected meshes for each structure type.
+- Add slope/roof/window rules so building clusters merge more like a city toy.
+- Add mesh-morphing or SDF-style blending for wider bases when adjacent supports touch.
 - Save and load grid state.
 - Add stronger visual distinction between carved interiors, terraces, and attached buildings.
-- Add resource-free placement constraints: supports, entrances, bridges, and stair paths.
+- Add stair paths and bridge constraints on top of the current supports and entrances.
