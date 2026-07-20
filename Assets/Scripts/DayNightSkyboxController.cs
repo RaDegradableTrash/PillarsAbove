@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic; 
 using UnityEngine; 
 using UnityEngine.Rendering;
+using UnityEngine.SceneManagement;
 
 /// PBR-friendly day/night lighting controller for URP.
 /// </summary>
@@ -217,6 +218,9 @@ public class DayNightSkyboxController : MonoBehaviour
     [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
     private static void AutoBootstrap()
     {
+        if (string.Equals(SceneManager.GetActiveScene().name, "V2", StringComparison.Ordinal))
+            return;
+
         DayNightSkyboxController existing = FindFirstObjectByType<DayNightSkyboxController>(FindObjectsInactive.Include);
         if (existing != null)
             return;

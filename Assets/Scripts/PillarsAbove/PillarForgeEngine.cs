@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using PillarsAbove.BuildingTiles;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace PillarsAbove
 {
@@ -100,7 +101,6 @@ namespace PillarsAbove
         private const int GridDepth = 151;
         private const float CellSize = 1f;
         private const float PillarRadius = 71f;
-        private const float BuildingTileVisualCellSize = 1f;
         private const float BuildingTileVisualScale = 0.5f;
         private const int LocalWfcRadius = 3;
         private const string OceanFoamShaderName = "PillarsAbove/OceanFoam";
@@ -136,6 +136,7 @@ namespace PillarsAbove
         private readonly HashSet<Vector3Int> buildingModuleCenters = new HashSet<Vector3Int>();
         private readonly HashSet<Vector3Int> structuralPillarCenters = new HashSet<Vector3Int>();
         private readonly HashSet<Vector3Int> roomVolumeCells = new HashSet<Vector3Int>();
+        private readonly HashSet<Vector3Int> buildingShellCells = new HashSet<Vector3Int>();
         private readonly Dictionary<Vector3Int, Vector3Int> roomPillarAssignments = new Dictionary<Vector3Int, Vector3Int>();
         private readonly List<Vector3> vertices = new List<Vector3>(32768);
         private readonly List<int> stoneTriangles = new List<int>(65536);
@@ -145,8 +146,12 @@ namespace PillarsAbove
         private readonly Dictionary<int, Vector3Int> faceToCell = new Dictionary<int, Vector3Int>();
         private readonly List<GameObject> buildPreviewCells = new List<GameObject>(27);
         private readonly Dictionary<Vector3Int, GameObject> buildingTileInstances = new Dictionary<Vector3Int, GameObject>();
+        private readonly Dictionary<Vector3Int, GameObject> topSealInstances = new Dictionary<Vector3Int, GameObject>();
+        private readonly Dictionary<Vector3Int, GameObject> bottomSealInstances = new Dictionary<Vector3Int, GameObject>();
         private readonly Dictionary<Vector3Int, GameObject> supportTileInstances = new Dictionary<Vector3Int, GameObject>();
         private readonly Dictionary<Vector3Int, TileFace> buildingTileOpenFaces = new Dictionary<Vector3Int, TileFace>();
+        private readonly Dictionary<Vector3Int, SealCorner> topSealCorners = new Dictionary<Vector3Int, SealCorner>();
+        private readonly Dictionary<Vector3Int, SealCorner> bottomSealCorners = new Dictionary<Vector3Int, SealCorner>();
         private readonly List<ShoreContactSample> shoreContacts = new List<ShoreContactSample>(256);
         private Mesh seaMesh;
 
@@ -195,6 +200,11 @@ namespace PillarsAbove
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.AfterSceneLoad)]
         private static void Bootstrap()
         {
+            if (string.Equals(SceneManager.GetActiveScene().name, "V2", StringComparison.Ordinal))
+            {
+                return;
+            }
+
             foreach (var engine in FindObjectsOfType<PillarForgeEngine>())
             {
                 if ((engine.gameObject.hideFlags & HideFlags.HideAndDontSave) == 0)
@@ -274,6 +284,10 @@ namespace PillarsAbove
                 summaries.Add(ValidatePlacementScenario(new Vector3Int(26, 44, 17), Vector3Int.left, 4));
                 summaries.Add(ValidatePlacementScenario(new Vector3Int(17, 48, 8), new Vector3Int(0, 0, 1), 4));
                 summaries.Add(ValidatePlacementScenario(new Vector3Int(17, 52, 26), new Vector3Int(0, 0, -1), 4));
+                summaries.Add(ValidateJoinedRoomTopology());
+                summaries.Add(ValidateSameLevelConcaveSeals());
+                summaries.Add(ValidateOffsetRoomIntersection());
+                summaries.Add(ValidateSealLayerCoexistence());
                 summaries.Add(ValidatePartiallyEmbeddedPlacement());
                 return "placement validation ok: " + string.Join("; ", summaries);
             }
@@ -307,10 +321,12 @@ namespace PillarsAbove
                 throw new InvalidOperationException("Expected " + expectedShellCells + " building cells, got " + buildingCells + ".");
             }
 
-            if (buildingTileInstances.Count != expectedShellCells || buildingTileOpenFaces.Count != expectedShellCells)
+            if (buildingShellCells.Count != expectedShellCells)
             {
-                throw new InvalidOperationException("Expected " + expectedShellCells + " runtime Cube tile choices, got " + buildingTileInstances.Count + ".");
+                throw new InvalidOperationException("Expected " + expectedShellCells + " registered room shell cells, got " + buildingShellCells.Count + ".");
             }
+
+            ValidatePlacedTileInterfaces();
 
             if (buildingModuleCenters.Count != roomCount)
             {
@@ -338,7 +354,10 @@ namespace PillarsAbove
                 throw new InvalidOperationException("Expected support tile choices for every column cell, got " + supportTileInstances.Count + " for " + columnCount + " column cells.");
             }
 
-            return DirectionName(outward) + " rooms=" + roomCount + " shellCells=" + buildingCells + " cubeTiles=" + buildingTileInstances.Count + " hollowCenters=" + roomCount + " pillars=" + structuralPillarCenters.Count + " columns=" + columnCount + " supportTiles=" + supportTileInstances.Count;
+            return DirectionName(outward) + " rooms=" + roomCount + " shellCells=" + buildingCells + " cubeTiles=" + buildingTileInstances.Count +
+                   " topSeals=" + topSealInstances.Count + " bottomSeals=" + bottomSealInstances.Count +
+                   " joinedCells=" + (expectedShellCells - buildingTileInstances.Count) + " hollowCenters=" + roomCount +
+                   " pillars=" + structuralPillarCenters.Count + " columns=" + columnCount + " supportTiles=" + supportTileInstances.Count;
         }
 
         private string ValidatePartiallyEmbeddedPlacement()
@@ -381,6 +400,187 @@ namespace PillarsAbove
             }
 
             return "partialEmbed=" + embeddedCells.Length + " deepOverlapBlocked";
+        }
+
+        private string ValidateJoinedRoomTopology()
+        {
+            ResetForValidation();
+            var firstCenter = new Vector3Int(17, 40, 17);
+            BuildModule(firstCenter - Vector3Int.right * 2, Vector3Int.right);
+            BuildModule(firstCenter + Vector3Int.right, Vector3Int.right);
+            BuildModule(firstCenter + new Vector3Int(0, 0, 1), new Vector3Int(0, 0, 1));
+            BuildModule(firstCenter + Vector3Int.right * 3 + new Vector3Int(0, 0, 1), new Vector3Int(0, 0, 1));
+
+            if (buildingModuleCenters.Count != 4)
+            {
+                throw new InvalidOperationException("Expected four rooms in joined 2x2 topology, got " + buildingModuleCenters.Count + ".");
+            }
+
+            ValidatePlacedTileInterfaces();
+            var removedInteriorTiles = buildingShellCells.Count - buildingTileInstances.Count;
+            if (removedInteriorTiles <= 0)
+            {
+                throw new InvalidOperationException("Joined 2x2 topology kept every internal wall tile.");
+            }
+
+            return "joined2x2 rooms=4 shellCells=" + buildingShellCells.Count + " cubeTiles=" + buildingTileInstances.Count + " joinedCells=" + removedInteriorTiles;
+        }
+
+        private string ValidateOffsetRoomIntersection()
+        {
+            ResetForValidation();
+            var firstCenter = new Vector3Int(17, 40, 17);
+            BuildModule(firstCenter - Vector3Int.right * 2, Vector3Int.right);
+            var firstRoomShell = new HashSet<Vector3Int>(buildingShellCells);
+            var firstOpenFaces = new Dictionary<Vector3Int, TileFace>(buildingTileOpenFaces);
+            var firstTopCorners = new Dictionary<Vector3Int, SealCorner>(topSealCorners);
+            var firstBottomCorners = new Dictionary<Vector3Int, SealCorner>(bottomSealCorners);
+            BuildModule(firstCenter + Vector3Int.up, Vector3Int.right);
+
+            if (buildingModuleCenters.Count != 2)
+            {
+                throw new InvalidOperationException("Expected two rooms in offset intersection, got " + buildingModuleCenters.Count + ".");
+            }
+
+            ValidatePlacedTileInterfaces();
+            var visibleBoundaryCells = 0;
+            foreach (var cell in roomVolumeCells)
+            {
+                if (RequiredConnectedOpenFaces(cell, roomVolumeCells) != AllCubeFaces)
+                {
+                    visibleBoundaryCells++;
+                    if (!buildingShellCells.Contains(cell))
+                    {
+                        throw new InvalidOperationException("Offset intersection lost union boundary cell " + cell + ".");
+                    }
+                }
+            }
+
+            if (buildingTileInstances.Count != visibleBoundaryCells)
+            {
+                throw new InvalidOperationException(
+                    "Offset intersection expected " + visibleBoundaryCells + " visible boundary prefabs, got " + buildingTileInstances.Count + ".");
+            }
+
+            var sealOnlyUpdates = 0;
+            foreach (var cell in firstRoomShell)
+            {
+                TileFace beforeOpenFaces;
+                TileFace afterOpenFaces;
+                if (!firstOpenFaces.TryGetValue(cell, out beforeOpenFaces) ||
+                    !buildingTileOpenFaces.TryGetValue(cell, out afterOpenFaces) ||
+                    beforeOpenFaces != afterOpenFaces)
+                {
+                    continue;
+                }
+
+                SealCorner beforeTop;
+                SealCorner afterTop;
+                SealCorner beforeBottom;
+                SealCorner afterBottom;
+                firstTopCorners.TryGetValue(cell, out beforeTop);
+                topSealCorners.TryGetValue(cell, out afterTop);
+                firstBottomCorners.TryGetValue(cell, out beforeBottom);
+                bottomSealCorners.TryGetValue(cell, out afterBottom);
+                if (beforeTop != afterTop || beforeBottom != afterBottom)
+                {
+                    sealOnlyUpdates++;
+                }
+            }
+
+            if (sealOnlyUpdates != 2 || topSealInstances.Count != 2 || bottomSealInstances.Count != 2)
+            {
+                throw new InvalidOperationException(
+                    "Offset intersection expected two TopSingle and two BottomSingle endpoint seals, got top=" +
+                    topSealInstances.Count + ", bottom=" + bottomSealInstances.Count + ", unchangedCubeUpdates=" + sealOnlyUpdates + ".");
+            }
+
+            foreach (var corners in topSealCorners.Values)
+            {
+                if (!IsSingleSealCorner(corners))
+                {
+                    throw new InvalidOperationException("Offset intersection placed a multi-corner Top seal instead of endpoint Singles: " + corners + ".");
+                }
+            }
+
+            foreach (var corners in bottomSealCorners.Values)
+            {
+                if (!IsSingleSealCorner(corners))
+                {
+                    throw new InvalidOperationException("Offset intersection placed a multi-corner Bottom seal instead of endpoint Singles: " + corners + ".");
+                }
+            }
+
+            return "offsetIntersection rooms=2 boundaryTiles=" + visibleBoundaryCells +
+                   " topSingles=" + topSealInstances.Count + " bottomSingles=" + bottomSealInstances.Count;
+        }
+
+        private static bool IsSingleSealCorner(SealCorner corners)
+        {
+            var value = (int)corners;
+            return value != 0 && (value & (value - 1)) == 0;
+        }
+
+        private string ValidateSameLevelConcaveSeals()
+        {
+            ResetForValidation();
+            var anchor = new Vector3Int(17, 40, 17);
+            BuildModule(anchor, Vector3Int.right);
+            BuildModule(anchor + Vector3Int.right * HouseFootprintCells, Vector3Int.right);
+            BuildModule(anchor + Vector3Int.right * 2 + new Vector3Int(0, 0, 1), new Vector3Int(0, 0, 1));
+
+            if (buildingModuleCenters.Count != 3)
+            {
+                throw new InvalidOperationException("Expected three rooms in same-level L topology, got " + buildingModuleCenters.Count + ".");
+            }
+
+            ValidatePlacedTileInterfaces();
+            if (topSealInstances.Count != 1 || bottomSealInstances.Count != 1)
+            {
+                throw new InvalidOperationException(
+                    "Same-level L topology expected exactly one TopSingle and one BottomSingle at its concave attachment corner, got top=" +
+                    topSealInstances.Count + ", bottom=" + bottomSealInstances.Count + ".");
+            }
+
+            foreach (var corners in topSealCorners.Values)
+            {
+                if (!IsSingleSealCorner(corners))
+                {
+                    throw new InvalidOperationException("Same-level L topology used a non-Single Top seal: " + corners + ".");
+                }
+            }
+
+            foreach (var corners in bottomSealCorners.Values)
+            {
+                if (!IsSingleSealCorner(corners))
+                {
+                    throw new InvalidOperationException("Same-level L topology used a non-Single Bottom seal: " + corners + ".");
+                }
+            }
+
+            return "sameLevelL rooms=3 topSingle=1 bottomSingle=1";
+        }
+
+        private string ValidateSealLayerCoexistence()
+        {
+            ResetForValidation();
+            if (closedCubeTile == null)
+            {
+                throw new InvalidOperationException("Closed Cube prefab is unavailable for Seal overlap validation.");
+            }
+
+            var cell = new Vector3Int(17, 40, 17);
+            PlaceBuildingTileInstance(cell, new BuildingTileChoice(closedCubeTile, 0));
+            PlaceSealTileInstance(cell, TileLayer.SealTop, SealCorner.All);
+            PlaceSealTileInstance(cell, TileLayer.SealBottom, SealCorner.All);
+            if (!buildingTileInstances.ContainsKey(cell) ||
+                !topSealInstances.ContainsKey(cell) ||
+                !bottomSealInstances.ContainsKey(cell))
+            {
+                throw new InvalidOperationException("Cube, Seal_Top and Seal_Bottom could not coexist in one cell.");
+            }
+
+            return "sealOverlap=Cube+Top+Bottom";
         }
 
         private void InitializeValidationScene()
@@ -705,7 +905,7 @@ namespace PillarsAbove
             oceanMaterial.color = new Color(0.08f, 0.62f, 0.62f);
             oceanMaterial.SetFloat("_Glossiness", 0.38f);
             oceanMaterial.SetFloat("_Metallic", 0.02f);
-            ConfigureOceanFoamMaterial(oceanMaterial, 2990);
+            ConfigureOceanFoamMaterial(oceanMaterial, (int)UnityEngine.Rendering.RenderQueue.Geometry + 20);
 
             previewMaterial = new Material(Shader.Find("Standard"));
             previewMaterial.name = "Runtime White Tile Preview";
@@ -769,7 +969,7 @@ namespace PillarsAbove
             material.SetColor("_FarWaterColor", new Color(0.50f, 0.51f, 0.51f, 1f));
             material.SetColor("_DiffuseTint", new Color(0.17f, 0.22f, 0.25f, 1f));
             material.SetColor("_ShoreRippleColor", new Color(0.36f, 0.45f, 0.47f, 1f));
-            material.SetFloat("_Alpha", 0.98f);
+            material.SetFloat("_Alpha", 1f);
             material.SetFloat("_WaveAmplitude", OceanWaveAmplitude);
             material.SetFloat("_WaveSpeed", OceanWaveSpeed);
             material.SetFloat("_PrimaryWaveLength", OceanPrimaryWaveLength * OceanWaveScaleMultiplier);
@@ -1092,6 +1292,7 @@ namespace PillarsAbove
                 return;
             }
 
+            var interactionStartTime = Time.realtimeSinceStartup;
             if (CountStoneCells() == 0)
             {
                 ResetPillarWorld();
@@ -1113,6 +1314,7 @@ namespace PillarsAbove
             }
 
             RunLocalWfc();
+            var stoneChanged = CountStoneCells() != stoneCountBefore;
             if (toolMode == ToolMode.Build &&
                 (CountStoneCells() == 0 ||
                  CountStoneCells() > stoneCountBefore ||
@@ -1122,7 +1324,16 @@ namespace PillarsAbove
                 return;
             }
 
-            RebuildMesh();
+            // Building tiles and supports are prefab instances. The few shallow mountain cells
+            // removed for embedding are covered by the room, so keep the click path responsive and
+            // reserve the full multi-million-cell mesh/collider rebuild for terrain editing tools.
+            if (toolMode != ToolMode.Build && stoneChanged)
+            {
+                RebuildMesh();
+            }
+
+            runtimeSelfTestStatus = toolMode.ToString().ToLowerInvariant() + ": " +
+                                    Mathf.RoundToInt((Time.realtimeSinceStartup - interactionStartTime) * 1000f) + "ms";
         }
 
         private void HandleRuntimeSelfTestInput()
@@ -1131,6 +1342,7 @@ namespace PillarsAbove
             {
                 RunBuildSelfTest();
             }
+
         }
 
         private void RunBuildSelfTest()
@@ -1144,8 +1356,9 @@ namespace PillarsAbove
             }
 
             var testOutward = Vector3Int.left;
+            var tangent = Mathf.Abs(testOutward.x) > 0 ? new Vector3Int(0, 0, 1) : new Vector3Int(1, 0, 0);
             var testAnchor = FindSelfTestSurfaceAnchor(testOutward, Mathf.RoundToInt(PillarWaterlineDrop) + 34, (GridDepth - 1) / 2);
-            CarveCavity(testAnchor + testOutward * 2 + Vector3Int.up, 3);
+            CarveCavity(testAnchor + testOutward * 3 + tangent + Vector3Int.up, 5);
             stoneBefore = CountStoneCells();
             var structuresBefore = structures.Count;
             BuildModule(testAnchor, testOutward);
@@ -1165,24 +1378,36 @@ namespace PillarsAbove
                 return;
             }
 
-            var focusCell = testAnchor + testOutward * 2 + Vector3Int.up;
-            var focusWorld = CellToWorld(focusCell);
+            var firstRoomStructureCount = structures.Count;
+            BuildModule(testAnchor + testOutward * HouseFootprintCells, testOutward);
+            var secondRoomStructureCount = structures.Count;
+            BuildModule(testAnchor + testOutward * 2 + tangent, tangent);
+            if (secondRoomStructureCount == firstRoomStructureCount ||
+                structures.Count == secondRoomStructureCount ||
+                buildingModuleCenters.Count < 3)
+            {
+                runtimeSelfTestStatus = "selftest: same-level L build failed";
+                return;
+            }
+
+            ValidatePlacedTileInterfaces();
+            var firstRoomCenter = testAnchor + testOutward * 2 + Vector3Int.up;
+            var focusWorld = CellToWorld(firstRoomCenter + testOutward + Vector3Int.up) + Vector3.up * 0.5f;
             Bounds placedTileBounds;
             if (TryGetBuildingTileInstanceBounds(out placedTileBounds))
             {
-                focusWorld = placedTileBounds.center;
+                focusWorld.y = placedTileBounds.center.y;
             }
 
-            var tangent = Mathf.Abs(testOutward.x) > 0 ? new Vector3Int(0, 0, 1) : new Vector3Int(1, 0, 0);
             targetHorizontal = new Vector2(focusWorld.x, focusWorld.z);
             targetHeight = Mathf.Clamp(focusWorld.y, 3f, GridHeight - 3f);
             orbitDistance = 8f;
             orbitAngles = new Vector2(CameraYawForOutward(testOutward), 22f);
             selfTestCameraOverride = true;
             selfTestCameraTarget = focusWorld;
-            selfTestCameraPosition = focusWorld + (Vector3)testOutward * 7f;
+            selfTestCameraPosition = focusWorld + (Vector3)testOutward * 9f - (Vector3)tangent * 6f + Vector3.up * 4f;
             sceneCamera.orthographic = true;
-            sceneCamera.orthographicSize = 1.9f;
+            sceneCamera.orthographicSize = 3.2f;
             sceneCamera.transform.position = selfTestCameraPosition;
             sceneCamera.transform.LookAt(selfTestCameraTarget);
             RebuildMesh();
@@ -1259,6 +1484,7 @@ namespace PillarsAbove
             buildingModuleCenters.Clear();
             structuralPillarCenters.Clear();
             roomVolumeCells.Clear();
+            buildingShellCells.Clear();
             roomPillarAssignments.Clear();
             ClearBuildingTileInstances();
             ClearSupportTileInstances();
@@ -1279,6 +1505,7 @@ namespace PillarsAbove
             buildingModuleCenters.Clear();
             structuralPillarCenters.Clear();
             roomVolumeCells.Clear();
+            buildingShellCells.Clear();
             roomPillarAssignments.Clear();
             ClearBuildingTileInstances();
             ClearSupportTileInstances();
@@ -1303,43 +1530,55 @@ namespace PillarsAbove
 
         private void ValidatePlacedTileInterfaces()
         {
-            foreach (var pair in buildingTileOpenFaces)
+            foreach (var cell in buildingShellCells)
             {
-                var cell = pair.Key;
-                var openFaces = pair.Value;
-                for (var i = 0; i < FaceDirections.Length; i++)
+                var expectedOpenFaces = RequiredConnectedOpenFaces(cell, roomVolumeCells);
+                TileFace actualOpenFaces;
+                var hasTile = buildingTileOpenFaces.TryGetValue(cell, out actualOpenFaces);
+                if (expectedOpenFaces == AllCubeFaces)
                 {
-                    var face = TileFaceFromDirection(FaceDirections[i]);
-                    var open = (openFaces & face) != 0;
-                    var neighbor = cell + FaceDirections[i];
-                    TileFace neighborOpenFaces;
-                    if (buildingTileOpenFaces.TryGetValue(neighbor, out neighborOpenFaces))
+                    if (hasTile || buildingTileInstances.ContainsKey(cell) ||
+                        topSealInstances.ContainsKey(cell) || bottomSealInstances.ContainsKey(cell))
                     {
-                        var neighborFace = BuildingWfcRules.Opposite(face);
-                        var neighborOpen = (neighborOpenFaces & neighborFace) != 0;
-                        if (!open || !neighborOpen)
-                        {
-                            throw new InvalidOperationException("Placed Cube closes an internal shell connection between " + cell + " " + face + " and " + neighbor + " " + neighborFace + ".");
-                        }
-
-                        continue;
+                        throw new InvalidOperationException("Fully internal joined cell still has a Cube or Seal prefab at " + cell + ".");
                     }
 
-                    if (roomVolumeCells.Contains(neighbor) && !structures.ContainsKey(neighbor))
-                    {
-                        if (!open)
-                        {
-                            throw new InvalidOperationException("Placed Cube closes toward room interior at " + cell + " " + face + ".");
-                        }
-
-                        continue;
-                    }
-
-                    if (open)
-                    {
-                        throw new InvalidOperationException("Placed Cube has an open exterior boundary face at " + cell + " " + face + ".");
-                    }
+                    continue;
                 }
+
+                if (!hasTile || actualOpenFaces != expectedOpenFaces)
+                {
+                    throw new InvalidOperationException(
+                        "Cube prefab open faces mismatch at " + cell + ": expected " + expectedOpenFaces + ", got " +
+                        (hasTile ? actualOpenFaces.ToString() : "no prefab") + ".");
+                }
+
+                ValidatePlacedSeal(cell, TileLayer.SealTop, RequiredSealCorners(cell, actualOpenFaces, TileLayer.SealTop, roomVolumeCells));
+                ValidatePlacedSeal(cell, TileLayer.SealBottom, RequiredSealCorners(cell, actualOpenFaces, TileLayer.SealBottom, roomVolumeCells));
+            }
+        }
+
+        private void ValidatePlacedSeal(Vector3Int cell, TileLayer layer, SealCorner expectedCorners)
+        {
+            var cornerMap = layer == TileLayer.SealTop ? topSealCorners : bottomSealCorners;
+            var instanceMap = layer == TileLayer.SealTop ? topSealInstances : bottomSealInstances;
+            SealCorner actualCorners;
+            var hasSeal = cornerMap.TryGetValue(cell, out actualCorners);
+            if (expectedCorners == SealCorner.None)
+            {
+                if (hasSeal || instanceMap.ContainsKey(cell))
+                {
+                    throw new InvalidOperationException(layer + " was placed without a required corner at " + cell + ".");
+                }
+
+                return;
+            }
+
+            if (!hasSeal || actualCorners != expectedCorners || !instanceMap.ContainsKey(cell))
+            {
+                throw new InvalidOperationException(
+                    layer + " corner mismatch at " + cell + ": expected " + expectedCorners + ", got " +
+                    (hasSeal ? actualCorners.ToString() : "no seal") + ".");
             }
         }
 
@@ -1418,6 +1657,7 @@ namespace PillarsAbove
                         structures.Remove(cell);
                         structureFacing.Remove(cell);
                         roomVolumeCells.Remove(cell);
+                        buildingShellCells.Remove(cell);
                         RemoveBuildingTileInstance(cell);
                         RemoveSupportTileInstance(cell);
                         MarkDirtyArea(cell, 1);
@@ -1448,6 +1688,7 @@ namespace PillarsAbove
                         structures.Remove(cell);
                         structureFacing.Remove(cell);
                         roomVolumeCells.Remove(cell);
+                        buildingShellCells.Remove(cell);
                         RemoveBuildingTileInstance(cell);
                         RemoveSupportTileInstance(cell);
                         MarkDirtyArea(cell, 1);
@@ -1472,12 +1713,6 @@ namespace PillarsAbove
 
             var moduleCenter = anchor + outward * 2;
             var volumeCells = GetRoomVolumeCells(anchor, outward);
-            var tileChoices = SolveRoomTiles(cells, volumeCells, moduleCenter);
-            if (tileChoices == null)
-            {
-                return;
-            }
-
             foreach (var cell in volumeCells)
             {
                 if (!IsInside(cell) ||
@@ -1485,6 +1720,16 @@ namespace PillarsAbove
                 {
                     return;
                 }
+            }
+
+            var prospectiveVolume = new HashSet<Vector3Int>(roomVolumeCells);
+            prospectiveVolume.UnionWith(volumeCells);
+            var affectedShellCells = GetAffectedShellCells(cells, prospectiveVolume);
+            HashSet<Vector3Int> fullyOpenCells;
+            var tileChoices = SolveConnectedRoomTiles(affectedShellCells, prospectiveVolume, out fullyOpenCells);
+            if (tileChoices == null)
+            {
+                return;
             }
 
             ClearEmbeddedMountainCells(volumeCells, anchor, outward);
@@ -1498,17 +1743,15 @@ namespace PillarsAbove
                     buildingCells++;
                 }
 
-                BuildingTileChoice choice;
-                if (tileChoices.TryGetValue(cell, out choice))
-                {
-                    PlaceBuildingTileInstance(cell, choice, moduleCenter + Vector3Int.up);
-                }
+                buildingShellCells.Add(cell);
             }
 
             foreach (var cell in volumeCells)
             {
                 roomVolumeCells.Add(cell);
             }
+
+            ApplyConnectedRoomTiles(affectedShellCells, tileChoices, fullyOpenCells);
 
             buildingModuleCenters.Add(moduleCenter);
             EnsureStructuralPillar(moduleCenter);
@@ -1588,20 +1831,50 @@ namespace PillarsAbove
             return offset.y == 0 && frontOffset == 0 && sideOffset == 0 ? StructureKind.HouseDoorA1001 : StructureKind.HouseWallA1002;
         }
 
-        private Dictionary<Vector3Int, BuildingTileChoice> SolveRoomTiles(List<Vector3Int> cells, List<Vector3Int> volumeCells, Vector3Int moduleCenter)
+        private HashSet<Vector3Int> GetAffectedShellCells(List<Vector3Int> newShellCells, HashSet<Vector3Int> prospectiveVolume)
+        {
+            var affected = new HashSet<Vector3Int>(newShellCells);
+            foreach (var shellCell in buildingShellCells)
+            {
+                var previousOpenFaces = RequiredConnectedOpenFaces(shellCell, roomVolumeCells);
+                var requiredOpenFaces = RequiredConnectedOpenFaces(shellCell, prospectiveVolume);
+                var previousTopCorners = RequiredSealCorners(shellCell, previousOpenFaces, TileLayer.SealTop, roomVolumeCells);
+                var requiredTopCorners = RequiredSealCorners(shellCell, requiredOpenFaces, TileLayer.SealTop, prospectiveVolume);
+                var previousBottomCorners = RequiredSealCorners(shellCell, previousOpenFaces, TileLayer.SealBottom, roomVolumeCells);
+                var requiredBottomCorners = RequiredSealCorners(shellCell, requiredOpenFaces, TileLayer.SealBottom, prospectiveVolume);
+                if (previousOpenFaces != requiredOpenFaces ||
+                    previousTopCorners != requiredTopCorners ||
+                    previousBottomCorners != requiredBottomCorners)
+                {
+                    affected.Add(shellCell);
+                }
+            }
+
+            return affected;
+        }
+
+        private Dictionary<Vector3Int, BuildingTileChoice> SolveConnectedRoomTiles(
+            IEnumerable<Vector3Int> cells,
+            HashSet<Vector3Int> prospectiveVolume,
+            out HashSet<Vector3Int> fullyOpenCells)
         {
             var result = new Dictionary<Vector3Int, BuildingTileChoice>();
+            fullyOpenCells = new HashSet<Vector3Int>();
             if (buildingTileCatalog == null || closedCubeTile == null)
             {
                 return result;
             }
 
             var variants = BuildCubeTileVariants();
-            var roomCenter = moduleCenter + Vector3Int.up;
             foreach (var cell in cells)
             {
-                var exteriorClosedFaces = ExteriorClosedFaces(cell, roomCenter);
-                var requiredOpenFaces = AllCubeFaces & ~exteriorClosedFaces;
+                var requiredOpenFaces = RequiredConnectedOpenFaces(cell, prospectiveVolume);
+                if (requiredOpenFaces == AllCubeFaces)
+                {
+                    fullyOpenCells.Add(cell);
+                    continue;
+                }
+
                 var candidates = new List<BuildingTileChoice>();
                 foreach (var variant in variants)
                 {
@@ -1623,23 +1896,96 @@ namespace PillarsAbove
             return result;
         }
 
-        private TileFace RequiredRoomOpenFaces(Vector3Int cell, Vector3Int roomCenter)
+        private TileFace RequiredConnectedOpenFaces(Vector3Int cell, HashSet<Vector3Int> volumeCells)
         {
-            return AllCubeFaces & ~ExteriorClosedFaces(cell, roomCenter);
+            var result = TileFace.None;
+            for (var i = 0; i < FaceDirections.Length; i++)
+            {
+                if (volumeCells.Contains(cell + FaceDirections[i]))
+                {
+                    result |= TileFaceFromDirection(FaceDirections[i]);
+                }
+            }
+
+            return result;
         }
 
-        private TileFace ExteriorClosedFaces(Vector3Int cell, Vector3Int roomCenter)
+        private void ApplyConnectedRoomTiles(
+            HashSet<Vector3Int> affectedShellCells,
+            Dictionary<Vector3Int, BuildingTileChoice> tileChoices,
+            HashSet<Vector3Int> fullyOpenCells)
         {
-            var exteriorClosedFaces = TileFace.None;
-            var offset = cell - roomCenter;
-            if (offset.x < 0) exteriorClosedFaces |= TileFace.NegativeX;
-            else if (offset.x > 0) exteriorClosedFaces |= TileFace.PositiveX;
-            if (offset.y < 0) exteriorClosedFaces |= TileFace.NegativeY;
-            else if (offset.y > 0) exteriorClosedFaces |= TileFace.PositiveY;
-            if (offset.z < 0) exteriorClosedFaces |= TileFace.NegativeZ;
-            else if (offset.z > 0) exteriorClosedFaces |= TileFace.PositiveZ;
+            foreach (var cell in affectedShellCells)
+            {
+                if (fullyOpenCells.Contains(cell))
+                {
+                    RemoveBuildingTileInstance(cell);
+                    continue;
+                }
 
-            return exteriorClosedFaces;
+                BuildingTileChoice choice;
+                if (tileChoices.TryGetValue(cell, out choice))
+                {
+                    PlaceBuildingTileInstance(cell, choice);
+                    ApplySealTiles(cell, GetLogicalOpenFaces(choice.Definition, choice.Rotation));
+                }
+            }
+
+            // Every placement pass can replace several neighboring prefab instances. Rebuild all
+            // shared seams from source meshes once the group is stable so each connection remains
+            // one-to-one even when a previously placed neighbor changed its tile variant.
+            BuildingTileMeshStitcher.StitchGrid(buildingTileInstances);
+        }
+
+        private void ApplySealTiles(Vector3Int cell, TileFace openFaces)
+        {
+            PlaceSealTileInstance(cell, TileLayer.SealTop, RequiredSealCorners(cell, openFaces, TileLayer.SealTop, roomVolumeCells));
+            PlaceSealTileInstance(cell, TileLayer.SealBottom, RequiredSealCorners(cell, openFaces, TileLayer.SealBottom, roomVolumeCells));
+        }
+
+        private SealCorner RequiredSealCorners(
+            Vector3Int cell,
+            TileFace openFaces,
+            TileLayer layer,
+            HashSet<Vector3Int> volumeCells)
+        {
+            var verticalFace = layer == TileLayer.SealTop ? TileFace.PositiveY : TileFace.NegativeY;
+            if ((openFaces & verticalFace) != 0)
+            {
+                return SealCorner.None;
+            }
+
+            var verticalDirection = layer == TileLayer.SealTop ? Vector3Int.up : Vector3Int.down;
+            var result = SealCorner.None;
+            AddRequiredSealCorner(ref result, cell, volumeCells, verticalDirection, Vector3Int.right, new Vector3Int(0, 0, 1), SealCorner.PositiveXPositiveZ);
+            AddRequiredSealCorner(ref result, cell, volumeCells, verticalDirection, Vector3Int.right, new Vector3Int(0, 0, -1), SealCorner.PositiveXNegativeZ);
+            AddRequiredSealCorner(ref result, cell, volumeCells, verticalDirection, Vector3Int.left, new Vector3Int(0, 0, 1), SealCorner.NegativeXPositiveZ);
+            AddRequiredSealCorner(ref result, cell, volumeCells, verticalDirection, Vector3Int.left, new Vector3Int(0, 0, -1), SealCorner.NegativeXNegativeZ);
+            return result;
+        }
+
+        private void AddRequiredSealCorner(
+            ref SealCorner result,
+            Vector3Int cell,
+            HashSet<Vector3Int> volumeCells,
+            Vector3Int verticalDirection,
+            Vector3Int xDirection,
+            Vector3Int zDirection,
+            SealCorner corner)
+        {
+            var xOccupied = volumeCells.Contains(cell + xDirection);
+            var zOccupied = volumeCells.Contains(cell + zDirection);
+            var diagonalOccupied = volumeCells.Contains(cell + xDirection + zDirection);
+            var sameLayerConcaveCorner = xOccupied && zOccupied && !diagonalOccupied;
+            var adjacentLayerAcrossX = volumeCells.Contains(cell + verticalDirection + xDirection);
+            var adjacentLayerAcrossZ = volumeCells.Contains(cell + verticalDirection + zDirection);
+            var adjacentLayerDiagonal = volumeCells.Contains(cell + verticalDirection + xDirection + zDirection);
+            var adjacentLayerBoundaryCorner =
+                (adjacentLayerAcrossX || adjacentLayerAcrossZ) && !adjacentLayerDiagonal;
+            if (sameLayerConcaveCorner || adjacentLayerBoundaryCorner)
+            {
+                result |= corner;
+            }
         }
 
         private List<BuildingTileChoice> BuildCubeTileVariants()
@@ -2256,10 +2602,19 @@ namespace PillarsAbove
             return IsStoneSolid(cell) || structures.ContainsKey(cell);
         }
 
-        private void PlaceBuildingTileInstance(Vector3Int cell, BuildingTileChoice choice, Vector3Int roomCenter)
+        private void PlaceBuildingTileInstance(Vector3Int cell, BuildingTileChoice choice)
         {
+            var requiredOpenFaces = GetLogicalOpenFaces(choice.Definition, choice.Rotation);
+            TileFace existingOpenFaces;
+            if (buildingTileOpenFaces.TryGetValue(cell, out existingOpenFaces) &&
+                existingOpenFaces == requiredOpenFaces &&
+                buildingTileInstances.ContainsKey(cell))
+            {
+                return;
+            }
+
             RemoveBuildingTileInstance(cell);
-            buildingTileOpenFaces[cell] = GetLogicalOpenFaces(choice.Definition, choice.Rotation);
+            buildingTileOpenFaces[cell] = requiredOpenFaces;
             if (suppressTileInstantiation && !Application.isPlaying)
             {
                 buildingTileInstances[cell] = null;
@@ -2274,11 +2629,98 @@ namespace PillarsAbove
             var instance = Instantiate(choice.Definition.gameObject, buildingTileRoot);
             instance.SetActive(true);
             instance.name = choice.Definition.name + "_r" + choice.Rotation + "_" + cell.x + "_" + cell.y + "_" + cell.z;
-            instance.transform.localPosition = CellToWorld(roomCenter) + (Vector3)(cell - roomCenter) * BuildingTileVisualCellSize;
+            instance.transform.localPosition = CellToWorld(cell);
             instance.transform.localRotation = choice.Definition.GetRotation(choice.Rotation);
             instance.transform.localScale *= BuildingTileVisualScale;
             ApplyBuildingTileMaterial(instance);
             buildingTileInstances[cell] = instance;
+        }
+
+        private void PlaceSealTileInstance(Vector3Int cell, TileLayer layer, SealCorner requiredCorners)
+        {
+            var instanceMap = layer == TileLayer.SealTop ? topSealInstances : bottomSealInstances;
+            var cornerMap = layer == TileLayer.SealTop ? topSealCorners : bottomSealCorners;
+            if (requiredCorners == SealCorner.None)
+            {
+                RemoveSealTileInstance(cell, layer);
+                return;
+            }
+
+            SealCorner existingCorners;
+            if (cornerMap.TryGetValue(cell, out existingCorners) &&
+                existingCorners == requiredCorners &&
+                instanceMap.ContainsKey(cell))
+            {
+                return;
+            }
+
+            BuildingTileChoice choice;
+            if (!TryChooseSealTile(layer, requiredCorners, out choice))
+            {
+                Debug.LogWarning("No " + layer + " prefab rotation matches required corners " + requiredCorners + " at " + cell + ".", this);
+                RemoveSealTileInstance(cell, layer);
+                return;
+            }
+
+            RemoveSealTileInstance(cell, layer);
+            cornerMap[cell] = requiredCorners;
+            if (suppressTileInstantiation && !Application.isPlaying)
+            {
+                instanceMap[cell] = null;
+                return;
+            }
+
+            if (choice.Definition == null || buildingTileRoot == null)
+            {
+                return;
+            }
+
+            var instance = Instantiate(choice.Definition.gameObject, buildingTileRoot);
+            instance.SetActive(true);
+            instance.name = choice.Definition.name + "_r" + choice.Rotation + "_" + cell.x + "_" + cell.y + "_" + cell.z;
+            instance.transform.localPosition = CellToWorld(cell);
+            instance.transform.localRotation = choice.Definition.GetRotation(choice.Rotation);
+            instance.transform.localScale *= BuildingTileVisualScale;
+            ApplyBuildingTileMaterial(instance);
+            instanceMap[cell] = instance;
+        }
+
+        private bool TryChooseSealTile(TileLayer layer, SealCorner requiredCorners, out BuildingTileChoice choice)
+        {
+            choice = default;
+            if (buildingTileCatalog == null || layer == TileLayer.Cube)
+            {
+                return false;
+            }
+
+            BuildingTileDefinition bestDefinition = null;
+            var bestRotation = 0;
+            foreach (var definition in buildingTileCatalog.Definitions(layer))
+            {
+                for (var rotation = 0; rotation < definition.RotationCount; rotation++)
+                {
+                    if (definition.GetSealCorners(rotation) != requiredCorners)
+                    {
+                        continue;
+                    }
+
+                    if (bestDefinition == null ||
+                        definition.Weight > bestDefinition.Weight ||
+                        definition.Weight == bestDefinition.Weight && string.CompareOrdinal(definition.name, bestDefinition.name) < 0)
+                    {
+                        bestDefinition = definition;
+                        bestRotation = rotation;
+                    }
+                }
+            }
+
+            if (bestDefinition == null)
+            {
+                return false;
+            }
+
+            choice = new BuildingTileChoice(bestDefinition, bestRotation);
+            return true;
         }
 
         private void PlaceSupportTileInstance(Vector3Int cell)
@@ -2382,6 +2824,29 @@ namespace PillarsAbove
 
             buildingTileInstances.Remove(cell);
             buildingTileOpenFaces.Remove(cell);
+            RemoveSealTileInstance(cell, TileLayer.SealTop);
+            RemoveSealTileInstance(cell, TileLayer.SealBottom);
+        }
+
+        private void RemoveSealTileInstance(Vector3Int cell, TileLayer layer)
+        {
+            var instanceMap = layer == TileLayer.SealTop ? topSealInstances : bottomSealInstances;
+            var cornerMap = layer == TileLayer.SealTop ? topSealCorners : bottomSealCorners;
+            GameObject instance;
+            if (instanceMap.TryGetValue(cell, out instance) && instance != null)
+            {
+                if (Application.isPlaying)
+                {
+                    Destroy(instance);
+                }
+                else
+                {
+                    DestroyImmediate(instance);
+                }
+            }
+
+            instanceMap.Remove(cell);
+            cornerMap.Remove(cell);
         }
 
         private void RemoveSupportTileInstance(Vector3Int cell)
@@ -2423,6 +2888,33 @@ namespace PillarsAbove
 
             buildingTileInstances.Clear();
             buildingTileOpenFaces.Clear();
+            ClearSealTileInstances(topSealInstances, topSealCorners);
+            ClearSealTileInstances(bottomSealInstances, bottomSealCorners);
+        }
+
+        private void ClearSealTileInstances(
+            Dictionary<Vector3Int, GameObject> instanceMap,
+            Dictionary<Vector3Int, SealCorner> cornerMap)
+        {
+            foreach (var pair in instanceMap)
+            {
+                if (pair.Value == null)
+                {
+                    continue;
+                }
+
+                if (Application.isPlaying)
+                {
+                    Destroy(pair.Value);
+                }
+                else
+                {
+                    DestroyImmediate(pair.Value);
+                }
+            }
+
+            instanceMap.Clear();
+            cornerMap.Clear();
         }
 
         private void ClearSupportTileInstances()

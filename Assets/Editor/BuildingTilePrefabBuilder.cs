@@ -12,6 +12,13 @@ public static class BuildingTilePrefabBuilder
     private const string SourcePath = "Assets/BuildingTiles.fbx";
     private const string OutputFolder = "Assets/Prefabs/BuildingTiles";
     private const string CatalogPath = "Assets/Resources/BuildingTileCatalog.asset";
+    // Each tile is placed in a 1x1x1 cell at runtime scale 0.5 (PillarForgeEngine.BuildingTileVisualScale),
+    // so a prefab whose root-space bounds are ~1.96 fills its cell as a cube with a thin seam gap.
+    private const float NormalizedTileRootExtent = 1.96f;
+    private const TileFace AllCubeFaces =
+        TileFace.PositiveX | TileFace.NegativeX |
+        TileFace.PositiveY | TileFace.NegativeY |
+        TileFace.PositiveZ | TileFace.NegativeZ;
 
     [InitializeOnLoadMethod]
     private static void BuildCatalogWhenMissing()
@@ -20,7 +27,8 @@ public static class BuildingTilePrefabBuilder
             AssetDatabase.LoadAssetAtPath<GameObject>(OutputFolder + "/Seal_TopSingle.prefab") == null ||
             SourceModelNeedsReadableImport() ||
             BuildingTilePrefabRootsNeedRebuild() ||
-            BuildingTilePrefabFaceDataNeedsRebuild())
+            BuildingTilePrefabFaceDataNeedsRebuild() ||
+            BuildingTilePrefabsNeedSquareNormalization())
         {
             EditorApplication.delayCall += Rebuild;
         }
@@ -42,6 +50,34 @@ public static class BuildingTilePrefabBuilder
         return transform.localRotation != Quaternion.identity ||
                transform.localScale != Vector3.one ||
                transform.parent != null;
+    }
+
+    private static bool BuildingTilePrefabsNeedSquareNormalization()
+    {
+        var cube = AssetDatabase.LoadAssetAtPath<GameObject>(OutputFolder + "/Cube_X+.prefab");
+        if (cube == null)
+        {
+            return false;
+        }
+
+        var instance = UnityEngine.Object.Instantiate(cube);
+        try
+        {
+            var size = MeasureLocalExtent(instance);
+            if (size.x <= 0f || size.y <= 0f || size.z <= 0f)
+            {
+                return false;
+            }
+
+            var max = Mathf.Max(size.x, size.y, size.z);
+            var min = Mathf.Min(size.x, size.y, size.z);
+            // Already normalized prefabs read as a cube; legacy rectangular prefabs trigger a rebuild.
+            return max > min * 1.05f;
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(instance);
+        }
     }
 
     private static bool SourceModelNeedsReadableImport()
@@ -71,9 +107,7 @@ public static class BuildingTilePrefabBuilder
                 return true;
             }
 
-            var expectedOverride = prefab.name == "Cube_X+Y+Z+"
-                ? TileFace.NegativeX | TileFace.PositiveY | TileFace.NegativeZ
-                : TileFace.None;
+            var expectedOverride = RootIdentityOpenFacesOverride(prefab.name);
             if (definition.RootIdentityOpenFacesOverride != expectedOverride)
             {
                 return true;
@@ -102,6 +136,9 @@ public static class BuildingTilePrefabBuilder
         var modelInstance = UnityEngine.Object.Instantiate(model);
         var sources = modelInstance.GetComponentsInChildren<Transform>(true);
         var prefabs = new List<GameObject>();
+        // Derive a single per-axis root-space factor from the cube mesh and apply it to every tile so
+        // cubes become unit cells (1:1:1) while seals scale by the same factor and keep their design size.
+        var cubeRootFactor = ComputeCubeRootFactor(modelInstance);
         try
         {
             foreach (var source in sources)
@@ -119,6 +156,7 @@ public static class BuildingTilePrefabBuilder
                 tile.transform.position = Vector3.zero;
                 tile.transform.rotation = Quaternion.identity;
                 tile.transform.localScale = Vector3.one;
+                ApplyRootScaleToLocal(visual, cubeRootFactor);
                 ConfigureDefinition(tile);
                 AddMeshColliders(tile);
 
@@ -185,6 +223,7 @@ public static class BuildingTilePrefabBuilder
         if (cubeCount != 26 || topCount != 5 || bottomCount != 5)
             throw new InvalidOperationException($"Expected 26 Cube, 5 Top and 5 Bottom prefabs; got {cubeCount}, {topCount}, {bottomCount}.");
         ValidateCubeShellCoverage();
+        ValidateSealCornerCoverage();
         var placementResult = ValidateRuntimePlacement();
         Debug.Log($"Building tile presets valid: {cubeCount} Cube, {topCount} Seal_Top, {bottomCount} Seal_Bottom. Cube prefabs use 24 axis-aligned rotations; open faces connect only to open faces; closed faces connect only to closed faces; Seal edge corner bits must match. {placementResult}");
     }
@@ -233,6 +272,35 @@ public static class BuildingTilePrefabBuilder
         if (requiredCount != 26)
             throw new InvalidOperationException("Expected 26 shell masks, got " + requiredCount + ".");
     }
+
+    private static void ValidateSealCornerCoverage()
+    {
+        var catalog = AssetDatabase.LoadAssetAtPath<BuildingTileCatalog>(CatalogPath);
+        ValidateSealLayerCoverage(catalog, TileLayer.SealTop);
+        ValidateSealLayerCoverage(catalog, TileLayer.SealBottom);
+    }
+
+    private static void ValidateSealLayerCoverage(BuildingTileCatalog catalog, TileLayer layer)
+    {
+        var variants = new HashSet<SealCorner>();
+        foreach (var definition in catalog.Definitions(layer))
+        {
+            for (var rotation = 0; rotation < definition.RotationCount; rotation++)
+            {
+                variants.Add(definition.GetSealCorners(rotation));
+            }
+        }
+
+        for (var mask = 1; mask <= (int)SealCorner.All; mask++)
+        {
+            var required = (SealCorner)mask;
+            if (!variants.Contains(required))
+            {
+                throw new InvalidOperationException(layer + " has no prefab rotation for corner mask " + required + ".");
+            }
+        }
+    }
+
 
     private static string ValidateRuntimePlacement()
     {
@@ -315,10 +383,9 @@ public static class BuildingTilePrefabBuilder
         var definition = tile.GetComponent<BuildingTileDefinition>() ?? tile.AddComponent<BuildingTileDefinition>();
         if (tile.name.StartsWith("Cube_", StringComparison.Ordinal))
         {
-            var rootIdentityOverride = tile.name == "Cube_X+Y+Z+"
-                ? TileFace.NegativeX | TileFace.PositiveY | TileFace.NegativeZ
-                : TileFace.None;
-            definition.Configure(TileLayer.Cube, ParseCubeFaces(tile.name), SealCorner.None, 10, rootIdentityOverride);
+            var canonicalOpenFaces = ParseCubeFaces(tile.name);
+            var rootIdentityOpenFaces = RootIdentityOpenFacesOverride(tile.name);
+            definition.Configure(TileLayer.Cube, canonicalOpenFaces, SealCorner.None, 10, rootIdentityOpenFaces);
             return;
         }
 
@@ -360,6 +427,119 @@ public static class BuildingTilePrefabBuilder
         return positive ? TileFace.PositiveZ : TileFace.NegativeZ;
     }
 
+    private static TileFace RootIdentityOpenFacesOverride(string tileName)
+    {
+        return tileName == "Cube_X+Y+Z+"
+            ? TileFace.NegativeX | TileFace.PositiveY | TileFace.NegativeZ
+            : TileFace.None;
+    }
+
+    private static TileFace DetectRootIdentityOpenFaces(GameObject tile, TileFace canonicalOpenFaces)
+    {
+        var filters = tile.GetComponentsInChildren<MeshFilter>(true);
+        var transformedVertices = new List<Vector3>();
+        var filterMatrices = new Dictionary<MeshFilter, Matrix4x4>();
+        for (var filterIndex = 0; filterIndex < filters.Length; filterIndex++)
+        {
+            var filter = filters[filterIndex];
+            if (filter.sharedMesh == null)
+            {
+                continue;
+            }
+
+            var matrix = tile.transform.worldToLocalMatrix * filter.transform.localToWorldMatrix;
+            filterMatrices[filter] = matrix;
+            var vertices = filter.sharedMesh.vertices;
+            for (var vertexIndex = 0; vertexIndex < vertices.Length; vertexIndex++)
+            {
+                transformedVertices.Add(matrix.MultiplyPoint3x4(vertices[vertexIndex]));
+            }
+        }
+
+        if (transformedVertices.Count == 0)
+        {
+            return canonicalOpenFaces;
+        }
+
+        var bounds = new Bounds(transformedVertices[0], Vector3.zero);
+        for (var i = 1; i < transformedVertices.Count; i++)
+        {
+            bounds.Encapsulate(transformedVertices[i]);
+        }
+
+        var scores = new Dictionary<TileFace, float>
+        {
+            { TileFace.PositiveX, 0f }, { TileFace.NegativeX, 0f },
+            { TileFace.PositiveY, 0f }, { TileFace.NegativeY, 0f },
+            { TileFace.PositiveZ, 0f }, { TileFace.NegativeZ, 0f }
+        };
+        foreach (var pair in filterMatrices)
+        {
+            var mesh = pair.Key.sharedMesh;
+            var matrix = pair.Value;
+            var vertices = mesh.vertices;
+            var triangles = mesh.triangles;
+            for (var triangleIndex = 0; triangleIndex + 2 < triangles.Length; triangleIndex += 3)
+            {
+                var a = matrix.MultiplyPoint3x4(vertices[triangles[triangleIndex]]);
+                var b = matrix.MultiplyPoint3x4(vertices[triangles[triangleIndex + 1]]);
+                var c = matrix.MultiplyPoint3x4(vertices[triangles[triangleIndex + 2]]);
+                var areaVector = Vector3.Cross(b - a, c - a) * 0.5f;
+                var centroid = (a + b + c) / 3f;
+                AccumulateFaceScore(scores, TileFace.PositiveX, centroid.x, bounds.center.x, bounds.extents.x, Mathf.Abs(areaVector.x), true);
+                AccumulateFaceScore(scores, TileFace.NegativeX, centroid.x, bounds.center.x, bounds.extents.x, Mathf.Abs(areaVector.x), false);
+                AccumulateFaceScore(scores, TileFace.PositiveY, centroid.y, bounds.center.y, bounds.extents.y, Mathf.Abs(areaVector.y), true);
+                AccumulateFaceScore(scores, TileFace.NegativeY, centroid.y, bounds.center.y, bounds.extents.y, Mathf.Abs(areaVector.y), false);
+                AccumulateFaceScore(scores, TileFace.PositiveZ, centroid.z, bounds.center.z, bounds.extents.z, Mathf.Abs(areaVector.z), true);
+                AccumulateFaceScore(scores, TileFace.NegativeZ, centroid.z, bounds.center.z, bounds.extents.z, Mathf.Abs(areaVector.z), false);
+            }
+        }
+
+        var rankedFaces = new List<KeyValuePair<TileFace, float>>(scores);
+        rankedFaces.Sort((a, b) => b.Value.CompareTo(a.Value));
+        var closedFaceCount = 6 - CountFaces(canonicalOpenFaces);
+        var closedFaces = TileFace.None;
+        for (var i = 0; i < closedFaceCount && i < rankedFaces.Count; i++)
+        {
+            closedFaces |= rankedFaces[i].Key;
+        }
+
+        return AllCubeFaces & ~closedFaces;
+    }
+
+    private static void AccumulateFaceScore(
+        Dictionary<TileFace, float> scores,
+        TileFace face,
+        float coordinate,
+        float center,
+        float extent,
+        float projectedArea,
+        bool positive)
+    {
+        if (extent <= 0.0001f || projectedArea <= 0.000001f)
+        {
+            return;
+        }
+
+        var outerThreshold = extent * 0.35f;
+        if (positive ? coordinate >= center + outerThreshold : coordinate <= center - outerThreshold)
+        {
+            scores[face] += projectedArea;
+        }
+    }
+
+    private static int CountFaces(TileFace faces)
+    {
+        var count = 0;
+        if ((faces & TileFace.PositiveX) != 0) count++;
+        if ((faces & TileFace.NegativeX) != 0) count++;
+        if ((faces & TileFace.PositiveY) != 0) count++;
+        if ((faces & TileFace.NegativeY) != 0) count++;
+        if ((faces & TileFace.PositiveZ) != 0) count++;
+        if ((faces & TileFace.NegativeZ) != 0) count++;
+        return count;
+    }
+
     private static SealCorner ParseSealCorners(string name)
     {
         // Canonical orientation follows the FBX's +X/+Z corner. Quarter turns generate every orientation.
@@ -379,6 +559,106 @@ public static class BuildingTilePrefabBuilder
             var collider = filter.gameObject.AddComponent<MeshCollider>();
             collider.sharedMesh = filter.sharedMesh;
         }
+    }
+
+    private static Vector3 ComputeCubeRootFactor(GameObject modelInstance)
+    {
+        foreach (var source in modelInstance.GetComponentsInChildren<Transform>(true))
+        {
+            if (!source.name.StartsWith("Cube_", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            var size = MeasureVisualExtentFromSource(source);
+            if (size.x <= 0f || size.y <= 0f || size.z <= 0f)
+            {
+                break;
+            }
+
+            return new Vector3(
+                NormalizedTileRootExtent / size.x,
+                NormalizedTileRootExtent / size.y,
+                NormalizedTileRootExtent / size.z);
+        }
+
+        return Vector3.one;
+    }
+
+    // Extent the source mesh will occupy once parented as a Visual with the FBX axis/scale conversion.
+    private static Vector3 MeasureVisualExtentFromSource(Transform source)
+    {
+        var visualLocal = Matrix4x4.TRS(Vector3.zero, source.localRotation, source.localScale);
+        return MeasureFiltersExtent(source, filter => visualLocal * (source.worldToLocalMatrix * filter.transform.localToWorldMatrix));
+    }
+
+    // Extent of all descendant meshes expressed in root local space.
+    private static Vector3 MeasureLocalExtent(GameObject root)
+    {
+        var rootToLocal = root.transform.worldToLocalMatrix;
+        return MeasureFiltersExtent(root.transform, filter => rootToLocal * filter.transform.localToWorldMatrix);
+    }
+
+    private static Vector3 MeasureFiltersExtent(Component root, Func<MeshFilter, Matrix4x4> matrixFor)
+    {
+        var first = true;
+        var min = Vector3.zero;
+        var max = Vector3.zero;
+        foreach (var filter in root.GetComponentsInChildren<MeshFilter>(true))
+        {
+            if (filter.sharedMesh == null)
+            {
+                continue;
+            }
+
+            var matrix = matrixFor(filter);
+            var vertices = filter.sharedMesh.vertices;
+            for (var i = 0; i < vertices.Length; i++)
+            {
+                var point = matrix.MultiplyPoint3x4(vertices[i]);
+                if (first)
+                {
+                    min = point;
+                    max = point;
+                    first = false;
+                }
+                else
+                {
+                    min = Vector3.Min(min, point);
+                    max = Vector3.Max(max, point);
+                }
+            }
+        }
+
+        return first ? Vector3.zero : max - min;
+    }
+
+    // Folds a desired root-space per-axis scale into the Visual's localScale. The Visual carries the
+    // FBX axis-conversion rotation, so a root axis maps to a (possibly different) local axis; for the
+    // 90-degree import rotation this is a clean per-axis swap and keeps "Visual" a direct child.
+    private static void ApplyRootScaleToLocal(GameObject visual, Vector3 rootScale)
+    {
+        if (rootScale == Vector3.one)
+        {
+            return;
+        }
+
+        var rotation = visual.transform.localRotation;
+        var localMultiplier = new Vector3(
+            RootAxisScale(rotation * Vector3.right, rootScale),
+            RootAxisScale(rotation * Vector3.up, rootScale),
+            RootAxisScale(rotation * Vector3.forward, rootScale));
+        visual.transform.localScale = Vector3.Scale(visual.transform.localScale, localMultiplier);
+    }
+
+    private static float RootAxisScale(Vector3 rotatedAxis, Vector3 rootScale)
+    {
+        var x = Mathf.Abs(rotatedAxis.x);
+        var y = Mathf.Abs(rotatedAxis.y);
+        var z = Mathf.Abs(rotatedAxis.z);
+        if (x >= y && x >= z) return rootScale.x;
+        if (y >= z) return rootScale.y;
+        return rootScale.z;
     }
 
     private static void EnsureFolder(string path)

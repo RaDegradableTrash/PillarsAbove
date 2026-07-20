@@ -42,6 +42,7 @@ namespace PillarsAbove.BuildingTiles
         [SerializeField] private SealCorner canonicalSealCorners;
         [SerializeField, Min(1)] private int weight = 10;
         [SerializeField] private bool allowQuarterTurns = true;
+        [SerializeField] private BuildingTileSeamSettings meshSeams = new BuildingTileSeamSettings();
 
         public TileLayer Layer => layer;
         public TileFace CanonicalOpenFaces => canonicalOpenFaces;
@@ -49,6 +50,7 @@ namespace PillarsAbove.BuildingTiles
         public SealCorner CanonicalSealCorners => canonicalSealCorners;
         public int Weight => Mathf.Max(1, weight);
         public int RotationCount => !allowQuarterTurns ? 1 : layer == TileLayer.Cube ? BuildingWfcRules.CubeRotationCount : BuildingWfcRules.SealRotationCount;
+        public BuildingTileSeamSettings MeshSeams => meshSeams;
 
         public Quaternion VisualRotationOffset
         {
@@ -107,7 +109,22 @@ namespace PillarsAbove.BuildingTiles
 
         public SealCorner GetSealCorners(int rotation)
         {
-            return BuildingWfcRules.RotateSealCorners(canonicalSealCorners, rotation);
+            // The imported Top seal Visual is rotated +90 degrees around X, which mirrors its
+            // authored Z corner in root space. Bottom seals retain the authored X/Z corner.
+            var rootCorners = layer == TileLayer.SealTop
+                ? MirrorSealCornersZ(canonicalSealCorners)
+                : canonicalSealCorners;
+            return BuildingWfcRules.RotateSealCorners(rootCorners, rotation);
+        }
+
+        private static SealCorner MirrorSealCornersZ(SealCorner corners)
+        {
+            var result = SealCorner.None;
+            if ((corners & SealCorner.PositiveXPositiveZ) != 0) result |= SealCorner.PositiveXNegativeZ;
+            if ((corners & SealCorner.PositiveXNegativeZ) != 0) result |= SealCorner.PositiveXPositiveZ;
+            if ((corners & SealCorner.NegativeXPositiveZ) != 0) result |= SealCorner.NegativeXNegativeZ;
+            if ((corners & SealCorner.NegativeXNegativeZ) != 0) result |= SealCorner.NegativeXPositiveZ;
+            return result;
         }
 
         public Quaternion GetRotation(int rotation)

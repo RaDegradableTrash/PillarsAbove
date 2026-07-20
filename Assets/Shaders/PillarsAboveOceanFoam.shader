@@ -9,7 +9,7 @@ Shader "PillarsAbove/OceanFoam"
         _FarWaterColor ("Far Water Haze", Color) = (0.50, 0.51, 0.51, 1)
         _DiffuseTint ("Diffuse Tint", Color) = (0.17, 0.22, 0.25, 1)
         _ShoreRippleColor ("Shore Ripple Color", Color) = (0.36, 0.45, 0.47, 1)
-        _Alpha ("Base Alpha", Range(0, 1)) = 0.98
+        _Alpha ("Base Alpha", Range(0, 1)) = 1
 
         _WaveAmplitude ("Wave Amplitude", Range(0.05, 5.0)) = 2.25
         _WaveSpeed ("Wave Speed", Range(0.05, 4.0)) = 0.64
@@ -17,6 +17,11 @@ Shader "PillarsAbove/OceanFoam"
         _SecondaryWaveLength ("Secondary Wave Length", Range(3.0, 80.0)) = 21
         _GerstnerSteepness ("Wave Steepness", Range(0, 1)) = 0.52
         _MicroRippleStrength ("Micro Ripple Strength", Range(0, 2)) = 0.22
+        _SimulationTex ("Interactive Ripple Texture", 2D) = "black" {}
+        _Displacement ("Interactive Ripple Displacement", Range(0, 5)) = 0.65
+        _NormalStrength ("Interactive Ripple Normal Strength", Range(0, 8)) = 1
+        _WaterUvMin ("Water UV World Min", Vector) = (0, 0, 0, 0)
+        _WaterUvSize ("Water UV World Size", Vector) = (1, 1, 0, 0)
 
         _FoamColor ("Foam Color", Color) = (0.64, 0.67, 0.66, 1)
         _ShoreFoamDistance ("Shore Ripple Distance", Range(0.1, 16)) = 11.5
@@ -31,6 +36,7 @@ Shader "PillarsAbove/OceanFoam"
         _SunGlitterStrength ("Sun Glitter", Range(0, 4)) = 0.42
         _ReflectionStrength ("Soft Reflection", Range(0, 2)) = 0.38
         _DiffuseStrength ("Wrapped Diffuse", Range(0, 2)) = 0.32
+        _ShadowStrength ("Realtime Shadow Strength", Range(0, 1)) = 0.78
         _FresnelPower ("Fresnel Power", Range(1, 8)) = 3.2
         _DepthColorRange ("Depth Color Range", Range(2, 80)) = 28
         _FarFogStart ("Far Water Fog Start", Range(20, 600)) = 170
@@ -39,10 +45,9 @@ Shader "PillarsAbove/OceanFoam"
 
     SubShader
     {
-        Tags { "Queue" = "Transparent-40" "RenderType" = "Transparent" }
+        Tags { "Queue" = "Geometry+20" "RenderType" = "Opaque" }
         LOD 250
-        Blend SrcAlpha OneMinusSrcAlpha
-        ZWrite Off
+        ZWrite On
         Cull Back
 
         Pass
@@ -75,6 +80,12 @@ Shader "PillarsAbove/OceanFoam"
             float _SecondaryWaveLength;
             float _GerstnerSteepness;
             float _MicroRippleStrength;
+            sampler2D _SimulationTex;
+            float4 _SimulationTex_TexelSize;
+            float _Displacement;
+            float _NormalStrength;
+            float4 _WaterUvMin;
+            float4 _WaterUvSize;
 
             float _ShoreFoamDistance;
             float _ShoreFoamStrength;
@@ -88,6 +99,7 @@ Shader "PillarsAbove/OceanFoam"
             float _SunGlitterStrength;
             float _ReflectionStrength;
             float _DiffuseStrength;
+            float _ShadowStrength;
             float _FresnelPower;
             float _DepthColorRange;
             float _FarFogStart;
@@ -100,11 +112,12 @@ Shader "PillarsAbove/OceanFoam"
             {
                 float4 vertex : POSITION;
                 float3 normal : NORMAL;
+                float2 uv : TEXCOORD0;
             };
 
             struct v2f
             {
-                float4 position : SV_POSITION;
+                float4 pos : SV_POSITION;
                 float3 worldPosition : TEXCOORD0;
                 float3 worldNormal : TEXCOORD1;
                 float4 screenPosition : TEXCOORD2;
@@ -160,12 +173,9 @@ Shader "PillarsAbove/OceanFoam"
                 float phase = dot(position.xz, dir) * waveNumber + _Time.y * _WaveSpeed * speedScale;
                 float sine = sin(phase);
                 float cosine = cos(phase);
-                float steepness = _GerstnerSteepness / max(waveNumber * amplitude * 5.0, 0.001);
-                float horizontal = steepness * amplitude * cosine;
-
-                position.xz += dir * horizontal;
                 position.y += amplitude * sine;
 
+                float steepness = _GerstnerSteepness / max(waveNumber * amplitude * 5.0, 0.001);
                 float wa = waveNumber * amplitude;
                 tangent += float3(
                     -dir.x * dir.x * steepness * wa * sine,
@@ -216,6 +226,11 @@ Shader "PillarsAbove/OceanFoam"
                 return displaced;
             }
 
+            float2 WaterWorldUv(float3 worldPosition)
+            {
+                return saturate((worldPosition.xz - _WaterUvMin.xy) / max(_WaterUvSize.xy, float2(0.001, 0.001)));
+            }
+
             v2f vert(appdata v)
             {
                 v2f o;
@@ -223,16 +238,26 @@ Shader "PillarsAbove/OceanFoam"
                 float3 worldNormal;
                 float crestEnergy;
                 float3 worldPosition = OceanPosition(baseWorldPosition, worldNormal, crestEnergy);
+                float2 texel = _SimulationTex_TexelSize.xy;
+                float2 rippleUv = WaterWorldUv(baseWorldPosition);
+                float ripple = tex2Dlod(_SimulationTex, float4(rippleUv, 0.0, 0.0)).r;
+                float rippleLeft = tex2Dlod(_SimulationTex, float4(rippleUv - float2(texel.x, 0.0), 0.0, 0.0)).r;
+                float rippleRight = tex2Dlod(_SimulationTex, float4(rippleUv + float2(texel.x, 0.0), 0.0, 0.0)).r;
+                float rippleDown = tex2Dlod(_SimulationTex, float4(rippleUv - float2(0.0, texel.y), 0.0, 0.0)).r;
+                float rippleUp = tex2Dlod(_SimulationTex, float4(rippleUv + float2(0.0, texel.y), 0.0, 0.0)).r;
+                float2 rippleGradient = float2(rippleRight - rippleLeft, rippleUp - rippleDown) * _NormalStrength;
+                worldPosition.y += ripple * _Displacement;
+                worldNormal = normalize(worldNormal + float3(-rippleGradient.x, 0.0, -rippleGradient.y));
 
-                o.position = UnityWorldToClipPos(worldPosition);
+                o.pos = UnityWorldToClipPos(worldPosition);
                 o.worldPosition = worldPosition;
                 o.worldNormal = worldNormal;
-                o.screenPosition = ComputeScreenPos(o.position);
+                o.screenPosition = ComputeScreenPos(o.pos);
                 o.eyeDepth = -mul(UNITY_MATRIX_V, float4(worldPosition, 1.0)).z;
                 o.height01 = saturate((worldPosition.y - baseWorldPosition.y) / max(_WaveAmplitude, 0.001) * 0.5 + 0.5);
                 o.crestEnergy = crestEnergy;
-                UNITY_TRANSFER_FOG(o, o.position);
-                TRANSFER_SHADOW(o);
+                UNITY_TRANSFER_FOG(o, o.pos);
+                TRANSFER_SHADOW_WPOS(o, worldPosition);
                 return o;
             }
 
@@ -254,7 +279,7 @@ Shader "PillarsAbove/OceanFoam"
                 float3 viewDirection = normalize(_WorldSpaceCameraPos.xyz - i.worldPosition);
                 float3 lightDirection = normalize(_WorldSpaceLightPos0.xyz);
                 float3 halfDirection = normalize(lightDirection + viewDirection);
-                float attenuation = SHADOW_ATTENUATION(i);
+                UNITY_LIGHT_ATTENUATION(attenuation, i, i.worldPosition);
                 float ndotl = saturate(dot(normal, lightDirection));
                 float wrappedDiffuse = saturate((dot(normal, lightDirection) + 0.38) / 1.38);
                 float ndotv = saturate(dot(normal, viewDirection));
@@ -285,6 +310,12 @@ Shader "PillarsAbove/OceanFoam"
                 float sunGlitter = (broadHighlight * 0.42 + sharpHighlight * (0.40 + glitterNoise * 0.65))
                     * _SunGlitterStrength * attenuation;
                 waterColor += _LightColor0.rgb * sunGlitter * 0.72;
+
+                // Realtime shadow map contribution. This is the real pillar/placed
+                // geometry shadow on the water surface, separate from stylized foam
+                // and reflection terms.
+                float realtimeShadow = lerp(1.0 - _ShadowStrength, 1.0, attenuation);
+                waterColor *= saturate(realtimeShadow);
 
                 // Foam is evaluated directly on the displaced water surface. Depth
                 // supplies shoreline contact; wave height and slope supply crest foam.

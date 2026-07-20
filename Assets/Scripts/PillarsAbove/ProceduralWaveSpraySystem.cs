@@ -169,7 +169,7 @@ namespace PillarsAbove
                     continue;
                 }
 
-                var closest = other.ClosestPoint(wavePoint.Position);
+                var closest = GetClosestPoint(other, wavePoint.Position);
                 var delta = wavePoint.Position - closest;
                 var distance = delta.magnitude;
                 if (distance > contactProbeRadius || Mathf.Abs(delta.y) > contactHeightTolerance + waveAmplitude * 0.35f)
@@ -281,6 +281,17 @@ namespace PillarsAbove
             var fromCenter = wavePoint - other.bounds.center;
             fromCenter.y = 0f;
             return fromCenter.sqrMagnitude > 0.0001f ? fromCenter.normalized : Vector3.up;
+        }
+
+        private static Vector3 GetClosestPoint(Collider other, Vector3 point)
+        {
+            var meshCollider = other as MeshCollider;
+            if (meshCollider != null && !meshCollider.convex)
+            {
+                return other.bounds.ClosestPoint(point);
+            }
+
+            return other.ClosestPoint(point);
         }
 
         private void EmitFromImpact(Collider source, Vector3 point, Vector3 normal, float force)

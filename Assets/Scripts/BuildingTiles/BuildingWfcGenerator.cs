@@ -21,6 +21,7 @@ namespace PillarsAbove.BuildingTiles
         [SerializeField] private bool generateOnStart;
 
         private readonly Dictionary<Vector3Int, Variant> cubes = new Dictionary<Vector3Int, Variant>();
+        private readonly Dictionary<Vector3Int, GameObject> cubeInstances = new Dictionary<Vector3Int, GameObject>();
         private readonly Dictionary<Vector3Int, Variant> topSeals = new Dictionary<Vector3Int, Variant>();
         private readonly Dictionary<Vector3Int, Variant> bottomSeals = new Dictionary<Vector3Int, Variant>();
         private Transform generatedRoot;
@@ -84,8 +85,9 @@ namespace PillarsAbove.BuildingTiles
             {
                 var variant = pair.Value[0];
                 cubes[pair.Key] = variant;
-                Spawn(variant, pair.Key, generatedRoot);
+                cubeInstances[pair.Key] = Spawn(variant, pair.Key, generatedRoot);
             }
+            BuildingTileMeshStitcher.StitchGrid(cubeInstances);
         }
 
         public bool TryPlaceSeal(Vector3Int cell, TileLayer layer, SealCorner requiredCorners)
@@ -114,6 +116,7 @@ namespace PillarsAbove.BuildingTiles
         public void ClearGenerated()
         {
             cubes.Clear();
+            cubeInstances.Clear();
             topSeals.Clear();
             bottomSeals.Clear();
             if (generatedRoot == null) return;
@@ -228,12 +231,13 @@ namespace PillarsAbove.BuildingTiles
             return true;
         }
 
-        private void Spawn(Variant variant, Vector3Int cell, Transform parent)
+        private GameObject Spawn(Variant variant, Vector3Int cell, Transform parent)
         {
             var instance = Instantiate(variant.Definition.gameObject, parent);
             instance.name = variant.Definition.name + "_R" + variant.Rotation;
             instance.transform.localPosition = Vector3.Scale((Vector3)cell, new Vector3(cellSize, cellSize, cellSize));
             instance.transform.localRotation = variant.Definition.GetRotation(variant.Rotation) * variant.Definition.transform.localRotation;
+            return instance;
         }
 
         private bool IsInside(Vector3Int cell)
